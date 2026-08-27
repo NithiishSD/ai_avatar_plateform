@@ -1,16 +1,28 @@
 import os
 import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
 import torch
 import soundfile as sf
 import numpy as np
 
-print("==========================================================")
-print("  MILESTONE 1: MULTI-MODEL TTS & ZERO-SHOT VOICE CLONING  ")
-print("==========================================================")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_DIR = PROJECT_ROOT / "outputs"
+INPUT_DIR = PROJECT_ROOT / "inputs"
+OUTPUT_DIR.mkdir(exist_ok=True)
+INPUT_DIR.mkdir(exist_ok=True)
 
-# Ensure output directory exists
-os.makedirs("outputs", exist_ok=True)
-os.makedirs("inputs", exist_ok=True)
+
+@dataclass(frozen=True)
+class SynthesisResult:
+    output_path: str
+    sample_rate: int
+    duration_seconds: float
+    latency_ms: float
+    model: str
+    mode: str
 
 
 class VoiceEngineRouter:
@@ -23,6 +35,26 @@ class VoiceEngineRouter:
         print(f"[Router Initialized] Processing Device: {self.device.upper()}")
         self.kokoro_pipeline = None
         self.xtts_model = None
+
+    def select_model(
+        self,
+        mode: str = "fast",
+        language: str = "en",
+        quality: str = "balanced",
+    ) -> str:
+        """Select the first available model for the requested workload."""
+        normalized_language = language.lower().replace("_", "-")
+        if mode == "clone":
+            return "xtts-v2"
+        if mode != "fast":
+            raise ValueError("Invalid mode! Choose 'fast' or 'clone'.")
+        if quality not in {"fast", "balanced", "high"}:
+            raise ValueError("Invalid quality! Choose 'fast', 'balanced', or 'high'.")
+        if normalized_language not in {"en", "en-us", "en-gb"}:
+            raise ValueError(
+                "Kokoro currently supports English only; use mode='clone' for multilingual synthesis."
+            )
+        return "kokoro"
 
     def load_kokoro_realtime(self):
         """Loads Kokoro-82M for real-time sub-100ms streaming generation."""
@@ -40,14 +72,25 @@ class VoiceEngineRouter:
             self.xtts_model = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2").to(self.device)
             print(" -> XTTS-v2 loaded successfully.")
 
-    def synthesize(self, text: str, mode: str = "fast", speaker_wav: str = None, output_filename: str = "speech.wav"):
+    def synthesize(
+        self,
+        text: str,
+        mode: str = "fast",
+        speaker_wav: Optional[str] = None,
+        output_filename: str = "speech.wav",
+        language: str = "en",
+        quality: str = "balanced",
+    ) -> SynthesisResult:
         """
         Executes synthesis based on target mode:
         - mode='fast': Real-time streaming via Kokoro-82M (<100ms target)
         - mode='clone': Zero-shot voice cloning via XTTS-v2 (>90% similarity target)
         """
+        if not text.strip():
+            raise ValueError("text must not be empty")
+        model_name = self.select_model(mode=mode, language=language, quality=quality)
         start_time = time.time()
-        output_path = os.path.join("outputs", output_filename)
+        output_path = OUTPUT_DIR / output_filename
 
         if mode == "fast":
             self.load_kokoro_realtime()
@@ -55,9 +98,12 @@ class VoiceEngineRouter:
             generator = self.kokoro_pipeline(text, voice='af_heart', speed=1.0)
             
             audio_chunks = [audio for _, _, audio in generator]
+            if not audio_chunks:
+                raise RuntimeError("Kokoro returned no audio chunks")
             combined_audio = np.concatenate(audio_chunks)
             sf.write(output_path, combined_audio, 24000)
             sample_rate = 24000
+            duration_seconds = len(combined_audio) / sample_rate
 
         elif mode == "clone":
             if not speaker_wav or not os.path.exists(speaker_wav):
@@ -78,15 +124,21 @@ class VoiceEngineRouter:
                 file_path=output_path
             )
             sample_rate = 24000
-        else:
-            raise ValueError("Invalid mode! Choose 'fast' for real-time or 'clone' for voice cloning.")
+            duration_seconds = float(sf.info(output_path).duration)
 
         latency = (time.time() - start_time) * 1000
         print("----------------------------------------------------------")
         print(f"✅ SUCCESS: Audio saved to -> {os.path.abspath(output_path)}")
         print(f"⏱️  Synthesis Latency: {latency:.2f} ms")
         print("==========================================================")
-        return output_path
+        return SynthesisResult(
+            output_path=str(output_path),
+            sample_rate=sample_rate,
+            duration_seconds=duration_seconds,
+            latency_ms=latency,
+            model=model_name,
+            mode=mode,
+        )
 
 
 # ==========================================================

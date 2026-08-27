@@ -1,0 +1,120 @@
+import sys
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from app import app
+from job_queue import CeleryJobQueue, InMemoryJobQueue
+from celery_app import celery
+from contracts import AudioSynthesisRequest, AvatarRenderJob
+from test_contracts import VALID_JOB
+
+
+class FakeRedis:
+    def __init__(self):
+        self.values = {}
+
+    def exists(self, key):
+        return key in self.values
+
+    def set(self, key, value):
+        self.values[key] = value
+
+    def get(self, key):
+        return self.values.get(key)
+
+
+class RenderJobApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    def setUp(self):
+        import app as app_module
+        app_module.job_queue = InMemoryJobQueue()
+
+    def test_create_render_job_returns_queued_status(self):
+        response = self.client.post("/api/v1/avatar/render-job", json=VALID_JOB)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json(), {"jobId": "AVT-9821-X", "status": "QUEUED"})
+
+    def test_status_endpoint_returns_queued_job(self):
+        self.client.post("/api/v1/avatar/render-job", json=VALID_JOB)
+
+        response = self.client.get("/api/v1/avatar/render-job/AVT-9821-X")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "QUEUED")
+
+    def test_invalid_payload_is_rejected_before_enqueue(self):
+        invalid_job = {**VALID_JOB, "targetFps": 0}
+
+        response = self.client.post("/api/v1/avatar/render-job", json=invalid_job)
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_duplicate_job_is_conflict(self):
+        self.client.post("/api/v1/avatar/render-job", json=VALID_JOB)
+
+        response = self.client.post("/api/v1/avatar/render-job", json=VALID_JOB)
+
+        self.assertEqual(response.status_code, 409)
+
+    def test_unknown_job_returns_not_found(self):
+        response = self.client.get("/api/v1/avatar/render-job/unknown")
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_celery_synthesis_task_invokes_voice_engine(self):
+        request = AudioSynthesisRequest(text="Hello from the worker")
+        expected_result = {
+            "output_path": "/tmp/speech.wav",
+            "sample_rate": 24000,
+            "duration_seconds": 1.2,
+            "latency_ms": 42.0,
+            "model": "kokoro",
+            "mode": "fast",
+        }
+
+        class FakeVoiceEngine:
+            def synthesize(self, **kwargs):
+                self.arguments = kwargs
+                return SimpleNamespace(**expected_result)
+
+        with patch("celery_app.VoiceEngineRouter", return_value=FakeVoiceEngine()):
+            from celery_app import synthesize_audio
+            result = synthesize_audio.run(request.model_dump(mode="json", by_alias=True))
+
+        self.assertEqual(result, expected_result)
+
+    def test_celery_queue_persists_job_for_status_lookup(self):
+        queue = CeleryJobQueue(redis_client=FakeRedis())
+        job = __import__("contracts").AvatarRenderJob.model_validate(VALID_JOB)
+
+        with patch("celery_app.process_render_job.delay") as delay:
+            queue.enqueue(job)
+
+        restored_job = queue.get("AVT-9821-X")
+        self.assertEqual(restored_job.status.value, "QUEUED")
+        self.assertEqual(restored_job.job.avatar_id, "AVATAR_FEMALE_04")
+        delay.assert_called_once()
+
+    def test_celery_queue_publishes_validated_payload(self):
+        celery.conf.task_always_eager = True
+        queue = CeleryJobQueue(redis_client=FakeRedis())
+
+        queued_job = queue.enqueue(AvatarRenderJob.model_validate(VALID_JOB))
+
+        self.assertEqual(queued_job.status.value, "QUEUED")
+        self.assertEqual(queue.get("AVT-9821-X").job.job_id, "AVT-9821-X")
+        celery.conf.task_always_eager = False
+
+
+if __name__ == "__main__":
+    unittest.main()
