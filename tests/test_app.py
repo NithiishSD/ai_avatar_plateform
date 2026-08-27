@@ -93,6 +93,26 @@ class RenderJobApiTests(unittest.TestCase):
 
         self.assertEqual(result, expected_result)
 
+    def test_synthesis_endpoint_queues_typed_request(self):
+        fake_task = type("Task", (), {"id": "TASK-123"})()
+        request = {"text": "Hello from the API", "mode": "fast", "language": "en"}
+
+        with patch("app.synthesize_audio.delay", return_value=fake_task) as delay:
+            response = self.client.post("/api/v1/audio/synthesize", json=request)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json(), {"taskId": "TASK-123", "status": "QUEUED"})
+        delay.assert_called_once()
+
+    def test_synthesis_status_reads_celery_state(self):
+        pending_task = type("Task", (), {"state": "PENDING"})()
+
+        with patch("app.celery.AsyncResult", return_value=pending_task):
+            response = self.client.get("/api/v1/audio/synthesize/TASK-123")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"taskId": "TASK-123", "status": "QUEUED"})
+
     def test_celery_queue_persists_job_for_status_lookup(self):
         queue = CeleryJobQueue(redis_client=FakeRedis())
         job = __import__("contracts").AvatarRenderJob.model_validate(VALID_JOB)

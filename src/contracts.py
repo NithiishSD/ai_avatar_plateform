@@ -111,3 +111,10 @@ class AudioSynthesisResponse(BaseModel):
     latency_ms: float = Field(alias="latencyMs")
     model: str
     mode: SynthesisMode
+
+
+class SynthesisJobResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    task_id: str = Field(alias="taskId")
+    status: str

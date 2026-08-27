@@ -13,7 +13,7 @@ The repository currently contains an initial Developer 1 voice milestone:
 - `clone` mode lazily loads XTTS-v2 and requires a local reference WAV file.
 - `tests/hardware_test.py` reports the selected Python, PyTorch, and CUDA state.
 - `requirements.txt` includes Kokoro, Coqui TTS, PyTorch CUDA wheels, audio libraries, and supporting packages.
-- No PostgreSQL layer or object storage adapter exists yet. The Phase 0 audio-visual render-job contract, FastAPI boundary, in-memory queue adapter, Celery tasks, and Redis-persisted queue adapter are now present and broker-verified. The audio synthesis task is now connected to `VoiceEngineRouter`.
+- No PostgreSQL layer or object storage adapter exists yet. The Phase 0 audio-visual render-job contract, FastAPI boundary, in-memory queue adapter, Celery tasks, Redis-persisted queue adapter, and asynchronous synthesis API are now present and broker-verified. The audio synthesis task is connected to `VoiceEngineRouter`.
 
 ## Baseline Verification
 
@@ -24,7 +24,7 @@ The repository currently contains an initial Developer 1 voice milestone:
 | CUDA availability | PASS | Project environment reports CUDA available on an NVIDIA GeForce RTX 4050 Laptop GPU with 6.05 GB VRAM. |
 | Fast Kokoro synthesis | EXISTING OUTPUT | `outputs/fast_speech.wav` is present, but this run is not a current GPU benchmark. |
 | XTTS voice cloning | NOT RUN | `inputs/voice_sample.wav` is absent. |
-| Automated regression tests | PASS | Sixteen standard-library `unittest` tests pass without loading large models. |
+| Automated regression tests | PASS | Eighteen standard-library `unittest` tests pass without loading large models. |
 | Redis/Celery delivery | PASS | A real Redis 7 container delivered a validated render job to a Celery worker and returned the result. |
 
 Baseline command:
@@ -71,7 +71,7 @@ Not started. These depend on the contracts, job lifecycle, audio metadata, and a
 
 ## Recommended Next Step
 
-Complete the Phase 0 contract freeze before adding another model. The typed render-job model, FastAPI service boundary, Celery task, queue adapters, real Redis broker delivery, and mocked audio synthesis task are verified; next add the synthesis API endpoint, durable synthesis status, and then run actual Kokoro inference on the RTX 4050.
+Complete the Phase 0 contract freeze before adding another model. The typed render-job model, FastAPI service boundary, Celery task, queue adapters, real Redis broker delivery, mocked audio synthesis task, and asynchronous synthesis API are verified; next run actual Kokoro inference on the RTX 4050 and persist completed output metadata.
 
 1. TTS synthesis requests and results.
 2. `POST /api/v1/avatar/render-job` payloads from the roadmap.
@@ -165,6 +165,13 @@ Evidence / artifact:
 - Tests: `python -m unittest discover -s tests -p 'test_*.py' -v` with a mocked voice engine.
 - Result: PASS - 16 tests completed in 0.042 seconds; the task parameter mapping and structured result were verified without loading a model.
 - Follow-up: Add a synthesis API endpoint and durable processing/failure status updates, then run a real GPU inference benchmark.
+
+#### 2026-08-27 - Asynchronous Synthesis API
+
+- Change: Added `POST /api/v1/audio/synthesize` and `GET /api/v1/audio/synthesize/{task_id}` backed by the Celery result backend.
+- Tests: `python -m unittest discover -s tests -p 'test_*.py' -v` with mocked Celery dispatch/state.
+- Result: PASS - 18 tests completed in 0.048 seconds.
+- Follow-up: Run the endpoint with a live worker and real Kokoro inference; persist output metadata and failure details.
 
 #### 2026-08-27 - Real Redis and Celery Broker Delivery
 

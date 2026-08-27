@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, status
 
-from contracts import AvatarRenderJob, RenderJobResponse
+from celery_app import celery, synthesize_audio
+from contracts import AudioSynthesisRequest, AvatarRenderJob, RenderJobResponse, SynthesisJobResponse
 import os
 
 from job_queue import CeleryJobQueue, InMemoryJobQueue
@@ -33,3 +34,20 @@ def get_render_job(job_id: str) -> RenderJobResponse:
     if queued_job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="render job not found")
     return RenderJobResponse(jobId=job_id, status=queued_job.status)
+
+
+@app.post(
+    "/api/v1/audio/synthesize",
+    response_model=SynthesisJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_synthesis_job(request: AudioSynthesisRequest) -> SynthesisJobResponse:
+    task = synthesize_audio.delay(request.model_dump(by_alias=True, mode="json"))
+    return SynthesisJobResponse(taskId=task.id, status="QUEUED")
+
+
+@app.get("/api/v1/audio/synthesize/{task_id}", response_model=SynthesisJobResponse)
+def get_synthesis_job(task_id: str) -> SynthesisJobResponse:
+    task = celery.AsyncResult(task_id)
+    task_status = "QUEUED" if task.state == "PENDING" else task.state
+    return SynthesisJobResponse(taskId=task_id, status=task_status)
