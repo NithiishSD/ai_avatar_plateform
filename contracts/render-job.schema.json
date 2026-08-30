@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AvatarRenderJob",
+  "type": "object",
+  "required": ["jobId", "avatarId", "audioUrl", "sampleRate", "durationMs", "phonemeTimestamps", "renderQuality", "targetFps"],
+  "properties": {
+    "jobId": { "type": "string" },
+    "avatarId": { "type": "string" },
+    "audioUrl": { "type": "string" },
+    "sampleRate": { "type": "integer" },
+    "durationMs": { "type": "integer" },
+    "phonemeTimestamps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["phoneme", "viseme", "startMs", "endMs"],
+        "properties": {
+          "phoneme": { "type": "string" },
+          "viseme": { "type": "string", "enum": ["viseme_sil","viseme_E","viseme_L","viseme_O","viseme_A","viseme_U","viseme_F","viseme_M"] },
+          "startMs": { "type": "integer" },
+          "endMs": { "type": "integer" }
+        }
+      }
+    },
+    "emotionVector": {
+      "type": "object",
+      "properties": {
+        "happy": { "type": "number" },
+        "neutral": { "type": "number" },
+        "eyeblinkRate": { "type": "number" }
+      }
+    },
+    "renderQuality": { "type": "string", "enum": ["720P", "1080P_HQ", "4K"] },
+    "targetFps": { "type": "integer" }
+  }
+}
