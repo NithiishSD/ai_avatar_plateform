@@ -1,8 +1,8 @@
-from fastapi import FastAPI, HTTPException, status
+import os
 
 from celery_app import celery, synthesize_audio
 from contracts import AudioSynthesisRequest, AvatarRenderJob, RenderJobResponse, SynthesisJobResponse
-import os
+from fastapi import FastAPI, HTTPException, status
 
 from job_queue import CeleryJobQueue, InMemoryJobQueue
 
@@ -13,6 +13,11 @@ app = FastAPI(
     description="Developer 1 audio and avatar render-job service.",
 )
 job_queue = CeleryJobQueue() if os.getenv("QUEUE_BACKEND") == "celery" else InMemoryJobQueue()
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "queueBackend": os.getenv("QUEUE_BACKEND", "in_memory")}
 
 
 @app.post(

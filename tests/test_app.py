@@ -44,6 +44,12 @@ class RenderJobApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json(), {"jobId": "AVT-9821-X", "status": "QUEUED"})
 
+    def test_health_reports_service_and_queue_backend(self):
+        response = self.client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok", "queueBackend": "in_memory"})
+
     def test_status_endpoint_returns_queued_job(self):
         self.client.post("/api/v1/avatar/render-job", json=VALID_JOB)
 

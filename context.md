@@ -3,6 +3,7 @@
 Last updated: 2026-08-27
 Owner: Developer 1 - Audio AI, Voice Synthesis, and Backend
 Roadmap source: `AI_Avatar_Platform_2_Developer_Roadmap.pdf`
+Primary requirements source: `4895e15d-8adb-4146-a985-52babca3b3c5_AI_Avatar_Creation_Platform_using_Open_Source_Tech.pdf`
 
 ## Project Snapshot
 
@@ -13,7 +14,7 @@ The repository currently contains an initial Developer 1 voice milestone:
 - `clone` mode lazily loads XTTS-v2 and requires a local reference WAV file.
 - `tests/hardware_test.py` reports the selected Python, PyTorch, and CUDA state.
 - `requirements.txt` includes Kokoro, Coqui TTS, PyTorch CUDA wheels, audio libraries, and supporting packages.
-- No PostgreSQL layer or object storage adapter exists yet. The Phase 0 audio-visual render-job contract, FastAPI boundary, in-memory queue adapter, Celery tasks, Redis-persisted queue adapter, and asynchronous synthesis API are now present and broker-verified. The audio synthesis task is connected to `VoiceEngineRouter`.
+- No PostgreSQL data-access layer or object storage adapter exists yet. Phase 0 is complete: the audio-visual render-job contract, FastAPI boundary, health endpoint, queue adapters, Celery tasks, Redis persistence, asynchronous synthesis API, live broker delivery, and reproducible Redis/PostgreSQL Compose services are present. The audio synthesis task is connected to `VoiceEngineRouter`.
 
 ## Baseline Verification
 
@@ -22,9 +23,9 @@ The repository currently contains an initial Developer 1 voice milestone:
 | Python compilation | PASS | `src/voice_engine.py` and `tests/hardware_test.py` compile successfully. |
 | Environment smoke test | PASS with blocker | The project environment and PyTorch import work. |
 | CUDA availability | PASS | Project environment reports CUDA available on an NVIDIA GeForce RTX 4050 Laptop GPU with 6.05 GB VRAM. |
-| Fast Kokoro synthesis | EXISTING OUTPUT | `outputs/fast_speech.wav` is present, but this run is not a current GPU benchmark. |
+| Fast Kokoro synthesis | PASS - FIRST LIVE RUN | `outputs/live_kokoro_benchmark.wav` is a valid mono 24 kHz WAV; first-run synthesis latency was 9367 ms for 2.95 seconds of audio. |
 | XTTS voice cloning | NOT RUN | `inputs/voice_sample.wav` is absent. |
-| Automated regression tests | PASS | Eighteen standard-library `unittest` tests pass without loading large models. |
+| Automated regression tests | PASS | Nineteen standard-library `unittest` tests pass without loading large models. |
 | Redis/Celery delivery | PASS | A real Redis 7 container delivered a validated render job to a Celery worker and returned the result. |
 
 Baseline command:
@@ -54,9 +55,29 @@ Baseline command:
 
 - [x] Kokoro integration is present in the router.
 - [x] XTTS-v2 integration is present in the router.
-- [x] Add model selection by language, latency, and quality requirements.
+- [~] Add model selection by language, latency, and quality requirements (basic fast/clone routing exists; quality currently validates but does not select alternate models).
 - [x] Add structured synthesis responses with duration, sample rate, and output URI.
 - [x] Add repeatable tests without loading large models.
+- [ ] Integrate Higgs Audio V2 and Dia, or document a hardware/quantization/remote-inference decision.
+- [ ] Measure repeated warm-model latency; the current live Kokoro baseline is cold-start only.
+
+### PDF Milestone 1 Acceptance Matrix
+
+The 20-page assignment PDF is the acceptance authority for this project. A mocked task or placeholder integration does not satisfy a deliverable because the PDF requires real multimedia processing with measurable metrics.
+
+| PDF requirement | Current status | Evidence still required |
+|---|---|---|
+| 3+ working models: Kokoro, XTTS-v2, OpenVoice V2 | PARTIAL | Kokoro and XTTS-v2 are wired; OpenVoice V2 is not integrated and must run on a real sample. |
+| Basic 30–60 second voice cloning | NOT DEMONSTRATED | Add an approved reference recording, validate duration/format, generate output, and preserve consent evidence. |
+| Automatic quality/model selection | PARTIAL | Current router only distinguishes `fast` and `clone`; quality does not choose a model or fallback. |
+| TTS quality MOS >3.5 | NOT MEASURED | Run a documented evaluation set and record human or validated automated MOS results. |
+| Voice cloning similarity >85% | NOT MEASURED | Run speaker-verification similarity against the reference voice and record the method/results. |
+| API initiation response <500 ms | NOT MEASURED | Benchmark authenticated API requests separately from background inference. |
+| API capacity 100+ requests/minute | NOT MEASURED | Run a load test against the queue/API boundary. |
+| Authentication and rate limiting | NOT IMPLEMENTED | Add API-key or equivalent authentication and request limits before calling Milestone 1 complete. |
+| Real-time target <100 ms / synthesis target <2 seconds where applicable | NOT MET | The current cold Kokoro run was 9367 ms; warm and chunk-level measurements are still required. |
+
+The broader PDF also asks for 5+ TTS models, MMS-TTS/OpenVoice support, lip sync, avatar generation, real-time streaming, quality monitoring, and ethical safeguards. Those are later milestones, but they cannot be claimed from the current Phase 0/early Phase 1 implementation.
 
 ### Phase 2 - Voice Cloning and Alignment
 
@@ -71,7 +92,7 @@ Not started. These depend on the contracts, job lifecycle, audio metadata, and a
 
 ## Recommended Next Step
 
-Complete the Phase 0 contract freeze before adding another model. The typed render-job model, FastAPI service boundary, Celery task, queue adapters, real Redis broker delivery, mocked audio synthesis task, and asynchronous synthesis API are verified; next run actual Kokoro inference on the RTX 4050 and persist completed output metadata.
+Phase 0 is complete as the contract-first integration foundation. It is the gold-standard baseline for future development, not a claim that the whole platform is production-ready. Against the full assignment PDF, Phase 1 is partially complete: Kokoro and XTTS-v2 work through the router, but OpenVoice V2, real cloning evidence, quality metrics, authentication/rate limiting, and required performance measurements are missing. The current test suite proves software behavior, not the PDF quality thresholds. Next, complete the PDF Milestone 1 acceptance matrix before beginning Phase 2 alignment.
 
 1. TTS synthesis requests and results.
 2. `POST /api/v1/avatar/render-job` payloads from the roadmap.
@@ -90,6 +111,25 @@ The validation-only and API tests use mock data and an in-memory queue. This let
 - Contract tests run without importing or loading Kokoro/XTTS-v2.
 - API and model decisions are recorded in this file.
 
+## Phase 0 Baseline Standard
+
+Phase 0 is considered complete and frozen for future work. Every later phase must preserve these rules:
+
+- Shared payloads use versioned, typed contracts with explicit validation and documented compatibility changes.
+- API handlers validate input and enqueue work; model inference stays in worker processes.
+- Queue implementations remain replaceable behind an adapter; local tests must not require Redis, GPUs, or model downloads.
+- Every asynchronous job has an observable identifier, status, failure path, and retry/idempotency strategy before production use.
+- Infrastructure is reproducible from configuration, with secrets excluded from source control.
+- Each milestone records executable tests, benchmark evidence, corrections, and known limitations in this file.
+- PDF thresholds are marked complete only after real multimedia evidence is produced; mocks prove software behavior only.
+
+### Phase 0 Limitations to Close Later
+
+- PostgreSQL is provisioned by Compose but has no schema, migrations, or data-access layer yet.
+- Redis status persistence is implemented for render jobs, while synthesis results currently rely on Celery's result backend.
+- Authentication, rate limiting, monitoring, retries, and durable failure metadata are not production-complete.
+- Object storage, consent records, and media retention policies are not implemented.
+
 ## Corrections and Decisions Log
 
 | Date | Area | Correction or decision | Reason |
@@ -98,6 +138,9 @@ The validation-only and API tests use mock data and an in-memory queue. This let
 | 2026-08-27 | Hardware | CUDA is currently unavailable in the project environment. | `torch.cuda.is_available()` returned `False`; GPU benchmarks are therefore pending. |
 | 2026-08-27 | Architecture | Freeze typed contracts before queue and renderer integration. | It gives both developers a testable boundary and keeps model execution replaceable. |
 | 2026-08-27 | Testing | Separate validation-only contract tests from model execution tests. | Large model downloads and GPU availability should not block API contract regressions. |
+| 2026-08-27 | Phase 1 scope | Mark Phase 1 partial rather than complete. | Higgs Audio V2/Dia are not present, quality does not select models, and only a cold Kokoro latency measurement exists. |
+| 2026-08-27 | Hardware fit | Treat the 5.77B Higgs target as requiring quantization, offload, or remote inference on a 6 GB RTX 4050. | The advertised model size exceeds the laptop GPU's available VRAM. |
+| 2026-08-27 | Requirements authority | Use the 20-page assignment PDF as the acceptance authority; the shorter 2-developer roadmap is an execution plan, not a substitute for the assignment thresholds. | The assignment requires real multimedia evidence, 3+ models, quality metrics, authentication/rate limiting, and measurable performance. |
 
 ## Test and Milestone Log
 
@@ -172,6 +215,26 @@ Evidence / artifact:
 - Tests: `python -m unittest discover -s tests -p 'test_*.py' -v` with mocked Celery dispatch/state.
 - Result: PASS - 18 tests completed in 0.048 seconds.
 - Follow-up: Run the endpoint with a live worker and real Kokoro inference; persist output metadata and failure details.
+
+#### 2026-08-27 - Live FastAPI to Celery to Kokoro Inference
+
+- Test: Redis 7 container, Celery worker with `--pool=solo`, FastAPI on port 8000, and `POST /api/v1/audio/synthesize` using Kokoro fast mode.
+- Result: PASS - task `1f4dc3ce-cc5e-406b-9854-df30f9894e97` completed successfully. Output: `outputs/live_kokoro_benchmark.wav`, mono 24 kHz PCM WAV, 2.95 seconds. Reported synthesis latency: 9367 ms.
+- Benchmark note: This is a cold-start measurement that includes model initialization and is above the roadmap's `<100 ms` target. Warm-model and chunk-level latency are not yet measured.
+- Follow-up: Add durable completed/failed synthesis metadata and run repeated warm-model measurements.
+
+#### 2026-08-27 - Phase 1 Status Review
+
+- Verified: Kokoro and XTTS-v2 integration, basic fast/clone routing, structured synthesis metadata, live Kokoro API execution, and model-free tests.
+- Incomplete: Higgs Audio V2/Dia integration, quality-aware model selection, and warm-model latency benchmark.
+- Decision: Keep Phase 1 open until the model/hardware strategy is chosen. Higgs Audio V2 5.77B cannot be assumed to fit uncompressed in the RTX 4050's 6 GB VRAM.
+
+#### 2026-08-27 - Phase 0 Completion
+
+- Change: Added Docker Compose definitions for Redis/PostgreSQL, `.env.example`, `/health`, and final Phase 0 status documentation.
+- Tests: `python -m unittest discover -s tests -p 'test_*.py' -q`; `docker compose config --quiet`; editor diagnostics.
+- Result: PASS - 19 tests completed in 0.054 seconds, Compose configuration valid, and no diagnostics in the changed Python files.
+- Follow-up: Begin Phase 2 reference-audio validation and warm Kokoro latency measurements.
 
 #### 2026-08-27 - Real Redis and Celery Broker Delivery
 
