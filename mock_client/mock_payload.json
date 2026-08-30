@@ -1,0 +1,46 @@
+{
+  "jobId": "MOCK-001",
+  "avatarId": "AVATAR_TEST_01",
+  "audioUrl": "mock://audio/test.wav",
+  "sampleRate": 24000,
+  "durationMs": 2000,
+  "phonemeTimestamps": [
+    {
+      "phoneme": "SIL",
+      "viseme": "viseme_sil",
+      "startMs": 0,
+      "endMs": 300
+    },
+    {
+      "phoneme": "EH",
+      "viseme": "viseme_E",
+      "startMs": 300,
+      "endMs": 700
+    },
+    {
+      "phoneme": "L",
+      "viseme": "viseme_L",
+      "startMs": 700,
+      "endMs": 1000
+    },
+    {
+      "phoneme": "OW",
+      "viseme": "viseme_O",
+      "startMs": 1000,
+      "endMs": 1500
+    },
+    {
+      "phoneme": "SIL",
+      "viseme": "viseme_sil",
+      "startMs": 1500,
+      "endMs": 2000
+    }
+  ],
+  "emotionVector": {
+    "happy": 0.8,
+    "neutral": 0.2,
+    "eyeblinkRate": 1.2
+  },
+  "renderQuality": "1080P_HQ",
+  "targetFps": 30
+}

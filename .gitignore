@@ -44,3 +44,7 @@ env/*
 *.exe
 *.exe.*
 *.exe.*/
+# Python virtual environment
+venv/
+
+
