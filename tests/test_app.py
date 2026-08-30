@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+backend_dir = Path(__file__).resolve().parents[1] / "backend"
+if not backend_dir.exists():
+    backend_dir = Path(__file__).resolve().parents[1] / "src"
+sys.path.insert(0, str(backend_dir))
 
 from app import app
 from job_queue import CeleryJobQueue, InMemoryJobQueue
@@ -49,6 +52,12 @@ class RenderJobApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok", "queueBackend": "in_memory"})
+
+    def test_cors_headers_allow_vite_dev_server(self):
+        response = self.client.get("/health", headers={"Origin": "http://localhost:5173"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:5173")
 
     def test_status_endpoint_returns_queued_job(self):
         self.client.post("/api/v1/avatar/render-job", json=VALID_JOB)

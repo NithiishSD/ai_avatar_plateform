@@ -51,7 +51,7 @@ body {
 
 .workspace {
   display: grid;
-  grid-template-columns: 1fr 350px;
+  grid-template-columns: 1.2fr 0.8fr;
   gap: 24px;
   padding: 24px;
 }
@@ -82,103 +82,45 @@ body {
   font-size: 13px;
 }
 
-.avatar-canvas {
-  height: 600px;
-  background: #0f172a;
+.studio-form {
+  display: grid;
+  gap: 16px;
+}
+
+.studio-form label {
+  display: grid;
+  gap: 8px;
+  font-size: 14px;
+  color: #d1d5db;
+}
+
+textarea,
+select {
+  width: 100%;
+  border: 1px solid #374151;
   border-radius: 8px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  overflow: hidden;
-}
-
-.avatar-bounding-box {
-  width: 300px;
-  height: 400px;
-  border: 2px dashed #60a5fa;
-  position: relative;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
-
-.box-label {
-  position: absolute;
-  top: -28px;
-  left: 0;
-  font-size: 12px;
-  color: #60a5fa;
-}
-
-.avatar-face {
-  width: 220px;
-  height: 280px;
-  border-radius: 45%;
-  background: #d1d5db;
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.eyes {
-  display: flex;
-  gap: 70px;
-  margin-top: 90px;
-}
-
-.eyes span {
-  width: 14px;
-  height: 14px;
   background: #111827;
-  border-radius: 50%;
+  color: #f9fafb;
+  padding: 12px 14px;
+  font: inherit;
 }
 
-.mouth {
-  margin-top: 55px;
-  width: 60px;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #111827;
-  font-weight: bold;
+textarea {
+  min-height: 120px;
+  resize: vertical;
 }
 
-.mouth span {
-  display: block;
-}
-
-.mouth.closed span {
-  width: 40px;
-  height: 3px;
-  background: #111827;
-}
-
-.mouth.E_shape span {
-  width: 45px;
-  height: 25px;
-  border: 3px solid #111827;
-  border-radius: 50%;
-  font-size: 16px;
-}
-
-.mouth.L_shape span {
-  font-size: 24px;
-}
-
-.mouth.O_shape span {
-  width: 32px;
-  height: 32px;
-  border: 3px solid #111827;
-  border-radius: 50%;
-  font-size: 0;
+.grid-two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
 }
 
 .controls {
   display: flex;
   gap: 12px;
-  margin-top: 16px;
+  margin-top: 8px;
+  flex-wrap: wrap;
 }
 
 button {
@@ -195,8 +137,26 @@ button:hover {
   opacity: 0.9;
 }
 
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 button.secondary {
   background: #374151;
+}
+
+.alert {
+  margin-top: 16px;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 14px;
+}
+
+.alert.error {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  color: #fecaca;
 }
 
 .info-panel {
@@ -224,10 +184,15 @@ button.secondary {
 
 .info-card strong {
   font-size: 14px;
+  word-break: break-word;
 }
 
 @media (max-width: 900px) {
   .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .grid-two {
     grid-template-columns: 1fr;
   }
 }

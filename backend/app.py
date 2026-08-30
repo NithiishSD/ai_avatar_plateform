@@ -3,6 +3,7 @@ import os
 from celery_app import celery, synthesize_audio
 from contracts import AudioSynthesisRequest, AvatarRenderJob, RenderJobResponse, SynthesisJobResponse
 from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 
 from job_queue import CeleryJobQueue, InMemoryJobQueue
 
@@ -11,6 +12,18 @@ app = FastAPI(
     title="AI Avatar Platform API",
     version="1.0.0",
     description="Developer 1 audio and avatar render-job service.",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 job_queue = CeleryJobQueue() if os.getenv("QUEUE_BACKEND") == "celery" else InMemoryJobQueue()
 
