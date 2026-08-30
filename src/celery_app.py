@@ -1,5 +1,6 @@
 import os
 
+# pyrefly: ignore [missing-import]
 from celery import Celery
 
 from contracts import AudioSynthesisRequest, AvatarRenderJob

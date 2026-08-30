@@ -8,7 +8,7 @@ env/*
 *.swp
 .DS_Store
 .env
-.env.example
+
 *.pdf
 *.zip
 *.tar.gz
