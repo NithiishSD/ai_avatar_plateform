@@ -56,15 +56,18 @@ function App() {
 
   useEffect(() => {
     if (!taskId) return;
-    if (!["PENDING", "STARTED", "RETRY", "QUEUED"].includes(taskStatus)) return;
+    // Stop polling if task is in a terminal state (completed, failed, or cancelled)
+    if (!["PENDING", "STARTED", "RETRY", "QUEUED", "PROCESSING", "RETRYING"].includes(taskStatus)) return;
 
     const timer = window.setTimeout(async () => {
       try {
         const response = await fetch(`${API_BASE}/api/v1/audio/synthesize/${taskId}`);
         if (!response.ok) throw new Error("Task status check failed");
         const payload = await response.json();
+        console.log("Status update:", payload);
         setTaskStatus(payload.status);
       } catch (err) {
+        console.error("Status check error:", err);
         setError(err.message || "Could not poll task status");
       }
     }, 1500);
@@ -78,18 +81,31 @@ function App() {
     setIsSubmitting(true);
 
     try {
+      const requestBody = { text, mode, language, quality };
+      console.log("Sending synthesis request:", requestBody);
+      
       const response = await fetch(`${API_BASE}/api/v1/audio/synthesize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, mode, language, quality }),
+        body: JSON.stringify(requestBody),
       });
 
+      console.log("Response status:", response.status);
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.detail || "Synthesis request failed");
+      console.log("Response payload:", payload);
+      
+      if (!response.ok) {
+        throw new Error(payload.detail || `Synthesis request failed with status ${response.status}`);
+      }
+
+      if (!payload.taskId) {
+        throw new Error("Backend returned invalid response: missing taskId");
+      }
 
       setTaskId(payload.taskId);
-      setTaskStatus(payload.status);
+      setTaskStatus(payload.status || "QUEUED");
     } catch (err) {
+      console.error("Synthesis error:", err);
       setError(err.message || "Could not start synthesis");
     } finally {
       setIsSubmitting(false);

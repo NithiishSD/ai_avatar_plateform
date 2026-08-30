@@ -7,17 +7,28 @@ from contracts import AudioSynthesisRequest, AvatarRenderJob
 from voice_engine import VoiceEngineRouter
 
 
-celery = Celery(
-    "avatar_platform",
-    broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
-    backend=os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1"),
-)
+# Use in-memory backend for local development (no Redis required)
+if os.getenv("QUEUE_BACKEND") == "in_memory":
+    celery = Celery(
+        "avatar_platform",
+        broker="memory://",
+        backend="cache+memory://",
+    )
+else:
+    celery = Celery(
+        "avatar_platform",
+        broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
+        backend=os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1"),
+    )
+
 celery.conf.update(
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    task_always_eager=os.getenv("QUEUE_BACKEND") == "in_memory",
+    task_store_eager_result=os.getenv("QUEUE_BACKEND") == "in_memory",
 )
 
 

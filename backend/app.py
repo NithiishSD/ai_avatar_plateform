@@ -60,12 +60,55 @@ def get_render_job(job_id: str) -> RenderJobResponse:
     status_code=status.HTTP_202_ACCEPTED,
 )
 def create_synthesis_job(request: AudioSynthesisRequest) -> SynthesisJobResponse:
-    task = synthesize_audio.delay(request.model_dump(by_alias=True, mode="json"))
-    return SynthesisJobResponse(taskId=task.id, status="QUEUED")
+    try:
+        # For in-memory development mode, run synchronously
+        if os.getenv("QUEUE_BACKEND") == "in_memory":
+            from voice_engine import VoiceEngineRouter
+            import uuid
+            
+            task_id = str(uuid.uuid4())
+            try:
+                router = VoiceEngineRouter()
+                router.synthesize(
+                    text=request.text,
+                    mode=request.mode.value,
+                    language=request.language,
+                    quality=request.quality,
+                    speaker_wav=request.speaker_wav,
+                    output_filename=request.output_filename,
+                )
+                # Synthesis succeeded
+                return SynthesisJobResponse(taskId=task_id, status="SUCCESS")
+            except Exception as e:
+                # Synthesis failed
+                return SynthesisJobResponse(taskId=task_id, status="FAILED")
+        else:
+            # For production, use async Celery task
+            task = synthesize_audio.delay(request.model_dump(by_alias=True, mode="json"))
+            return SynthesisJobResponse(taskId=task.id, status="QUEUED")
+    except Exception as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Synthesis service unavailable: {str(error)}",
+        ) from error
 
 
 @app.get("/api/v1/audio/synthesize/{task_id}", response_model=SynthesisJobResponse)
 def get_synthesis_job(task_id: str) -> SynthesisJobResponse:
-    task = celery.AsyncResult(task_id)
-    task_status = "QUEUED" if task.state == "PENDING" else task.state
-    return SynthesisJobResponse(taskId=task_id, status=task_status)
+    try:
+        task = celery.AsyncResult(task_id)
+        # Map Celery states to user-facing states
+        state_mapping = {
+            "PENDING": "QUEUED",
+            "STARTED": "PROCESSING",
+            "SUCCESS": "SUCCESS",
+            "FAILURE": "FAILED",
+            "RETRY": "RETRYING",
+            "REVOKED": "CANCELLED",
+        }
+        task_status = state_mapping.get(task.state, task.state)
+        return SynthesisJobResponse(taskId=task_id, status=task_status)
+    except Exception as error:
+        # For in-memory mode, task won't be found in Celery, but that's okay
+        # Return the status as-is or a default
+        return SynthesisJobResponse(taskId=task_id, status="UNKNOWN")
