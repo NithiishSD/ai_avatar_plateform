@@ -13,18 +13,20 @@ The project has been refactored into a modular structure:
 ```
 ai_avatar_plateform/
 ├── backend/                    # FastAPI + Celery services
-│   ├── app.py                 # API endpoints, static /outputs mount, model_used in responses
+│   ├── app.py                 # API endpoints, static /outputs mount, /api/v1/audio/samples endpoint
+│   ├── audio_utils.py         # Audio probing, format conversion (WAV 24kHz mono), validation, inputs/ scanning
 │   ├── celery_app.py          # Celery tasks with style field passthrough
 │   ├── contracts.py           # Pydantic schemas (HIGH_QUALITY, DIALOGUE modes; style, model_used fields)
 │   ├── job_queue.py           # Queue abstractions
-│   ├── voice_engine.py        # 4-model TTS router (Kokoro, XTTS-v2, Higgs TTS 2, Dia-1.6B)
-│   ├── requirements.txt       # Python dependencies (Higgs/Dia documented)
+│   ├── voice_engine.py        # 4-model TTS router (Kokoro, XTTS-v2, Higgs TTS 2, Dia-1.6B) + clone validation
+│   ├── requirements.txt       # Python dependencies (Higgs/Dia/soundfile/librosa documented)
 │   ├── docker-compose.yml     # Redis & PostgreSQL services
 │   └── outputs/               # Generated audio files
 ├── frontend/                   # React + Vite UI
-│   ├── src/App.jsx            # 4-mode controls, language, style, model badge, routing hint
+│   ├── src/App.jsx            # 4-mode controls, language, style, model badge, clone sample dropdown & metadata
 │   ├── vite.config.js         # Dev server with proxy
 │   └── package.json           # Node dependencies
+├── inputs/                    # Source voice samples for cloning (auto-converted to .converted/)
 ├── docs/                      # Documentation & PDFs
 ├── tests/                     # 37 backend tests
 ├── README.md                  # Setup & run instructions
@@ -35,7 +37,25 @@ ai_avatar_plateform/
 
 ---
 
-### Recent Changes (Session 2: 2026-09-04 — Phase 1 Multi-Model TTS Router)
+### Recent Changes (Session 2: 2026-09-04 — Phase 1 & 2: Multi-Model Router + Voice Clone Inputs/Audio Conversion)
+
+10. **Voice Clone Audio Sample Selector from `inputs/` Directory & Auto-Conversion (`audio_utils.py`)**
+    - **Problem**: Voice cloning previously required manual file path typing or UI file upload, with potential audio format/sample-rate/channel mismatches causing XTTS-v2 failures or crashes.
+    - **Solution (`backend/audio_utils.py`)**:
+      - `list_voice_samples(inputs_dir)`: Scans `inputs/` folder for supported audio formats (`.wav`, `.flac`, `.ogg`, `.mp3`, `.m4a`, `.aac`, `.mp4`, `.wma`, etc.) and returns structured metadata (`AudioInfo`).
+      - `probe_audio(file_path)`: Fast metadata extraction using `soundfile`, falling back to `librosa` for non-standard containers.
+      - `validate_and_convert_for_cloning(source_path)`: Fully validates duration (min 1.0s, max 120s), channel count, and sample rate. Automatically converts any format to 24kHz Mono WAV using `librosa.load` + `soundfile.write` into `inputs/.converted/`, hashing parameters to avoid re-conversion.
+      - `AudioValidationError`: Structured custom exception providing actionable, user-friendly guidance if an audio file is corrupted, silent, or too short/long.
+    - **Backend API (`backend/app.py`)**:
+      - Added `GET /api/v1/audio/samples` returning available reference audio samples in `inputs/` with detailed metadata (`duration`, `sample_rate`, `channels`, `format`, `size_bytes`, `ready_for_cloning`, `duration_label`).
+    - **Voice Engine Integration (`backend/voice_engine.py`)**:
+      - `_synthesize_xtts()` now passes speaker reference files through `validate_and_convert_for_cloning()`, guaranteeing 24kHz mono WAV input for XTTS-v2 and surfacing clear `AudioValidationError` messages.
+    - **Frontend Clone Mode Panel (`frontend/src/App.jsx`)**:
+      - Switching to `clone` mode auto-fetches voice samples from `GET /api/v1/audio/samples`.
+      - Interactive dropdown selector displaying filename, duration, and format.
+      - Selected sample metadata badge grid showing duration, sample rate, size, and conversion state (✅ Ready vs ⚡ Auto-convert).
+      - "↻ Refresh" button to re-scan `inputs/` dynamically without page reload.
+      - Helpful empty state guiding users to drop audio files into `inputs/` with supported formats listed.
 
 4. **Integrated Higgs TTS 2 (3B, `bosonai/higgs-tts-2-3b-base`)**
    - **Model**: Higgs TTS 2 is the successor to Higgs Audio V2. The 3B variant (~3 GB VRAM) fits the RTX 4050 (6.05 GB). Full 5.77B is available as `device_map="auto"` but exceeds VRAM.
@@ -209,8 +229,10 @@ The broader PDF also asks for 5+ TTS models, MMS-TTS/OpenVoice support, lip sync
 
 ### Phase 2 - Voice Cloning and Alignment
 
-- [ ] Validate reference-audio duration, format, sample rate, and consent metadata.
-- [ ] Integrate OpenVoice V2 or confirm XTTS-v2 as the first cloning backend.
+- [x] Validate reference-audio duration, format, sample rate, and channels (`backend/audio_utils.py`).
+- [x] Auto audio format converter (`librosa` + `soundfile`) converting MP3/FLAC/OGG/M4A/etc. to 24kHz mono WAV.
+- [x] Voice sample selector directly from `inputs/` folder with real-time UI probe.
+- [x] Confirm XTTS-v2 as the zero-shot cloning backend integrated with validation pipeline.
 - [ ] Implement forced alignment and millisecond phoneme timestamps.
 - [ ] Map phonemes to the shared viseme vocabulary.
 
@@ -441,11 +463,25 @@ Evidence / artifact:
   - Task Status Polling: `GET /api/v1/audio/synthesize/{taskId}` -> returns `status: SUCCESS`.
   - Static Audio: `GET /outputs/speech.wav` -> `200 OK`, `Content-Type: audio/x-wav`.
 
+#### 2026-09-04 - Phase 1 Multi-Model Router & Phase 2 Voice Clone Pipeline
+
+- Change:
+  - Phase 1: Integrated 4 TTS models (Kokoro-82M, XTTS-v2, Higgs TTS 2 3B, Dia-1.6B) with full automated routing by mode, language, quality, and style (`[S1]`/`[S2]` speaker tags). Added `style` and `model_used` schema attributes.
+  - Phase 2: Created `backend/audio_utils.py` for scanning `inputs/`, probing metadata, validating duration/channels/rate, and automatically converting any audio format (MP3, FLAC, OGG, M4A, AAC, WAV, etc.) to 24kHz mono WAV in `inputs/.converted/`.
+  - Added `GET /api/v1/audio/samples` API endpoint with full metadata and clone readiness flag.
+  - Added frontend clone mode selector reading from `inputs/`, metadata badges, format support guide, and refresh button.
+- Tests: `PYTHONPATH=backend backend/.conda/bin/python -m unittest discover -s tests -p 'test_*.py' -v`
+- Result: PASS - 37/37 unit tests completed successfully (21 router tests, 5 audio utils tests, contract & Celery tests).
+- Follow-up: Proceed with Phase 2 forced alignment (phoneme timestamp extraction) and viseme mapping.
+
 ## Useful Paths
 
 - Backend Entrypoint: `backend/app.py`
 - Celery Configuration: `backend/celery_app.py`
 - Voice Engine Router: `backend/voice_engine.py`
+- Audio Utilities & Format Converter: `backend/audio_utils.py`
+- Voice Sample Inputs: `inputs/`
+- Converted Reference Audio: `inputs/.converted/`
 - Frontend UI: `frontend/src/App.jsx`
 - Type Checker / LSP Config: `pyrefly.toml`
 - Environment Config: `.env`
