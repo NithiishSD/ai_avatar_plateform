@@ -1,11 +1,11 @@
 # AI Avatar Platform Development Context
 
-Last updated: 2026-09-04
+Last updated: 2026-09-04 (Session 2)
 Owner: Developer 1 - Audio AI, Voice Synthesis, and Backend
 Roadmap source: `AI_Avatar_Platform_2_Developer_Roadmap.pdf`
 Primary requirements source: `4895e15d-8adb-4146-a985-52babca3b3c5_AI_Avatar_Creation_Platform_using_Open_Source_Tech.pdf`
 
-## Project Structure & Current State (2026-09-04)
+## Project Structure & Current State (2026-09-04, Session 2)
 
 ### Repository Organization
 The project has been refactored into a modular structure:
@@ -13,27 +13,72 @@ The project has been refactored into a modular structure:
 ```
 ai_avatar_plateform/
 ├── backend/                    # FastAPI + Celery services
-│   ├── app.py                 # Main API endpoints & static /outputs mount
-│   ├── celery_app.py          # Celery task definitions & eager configuration
-│   ├── contracts.py           # Pydantic schemas
+│   ├── app.py                 # API endpoints, static /outputs mount, model_used in responses
+│   ├── celery_app.py          # Celery tasks with style field passthrough
+│   ├── contracts.py           # Pydantic schemas (HIGH_QUALITY, DIALOGUE modes; style, model_used fields)
 │   ├── job_queue.py           # Queue abstractions
-│   ├── voice_engine.py        # TTS router (Kokoro, XTTS-v2)
-│   ├── requirements.txt       # Python dependencies
+│   ├── voice_engine.py        # 4-model TTS router (Kokoro, XTTS-v2, Higgs TTS 2, Dia-1.6B)
+│   ├── requirements.txt       # Python dependencies (Higgs/Dia documented)
 │   ├── docker-compose.yml     # Redis & PostgreSQL services
 │   └── outputs/               # Generated audio files
 ├── frontend/                   # React + Vite UI
-│   ├── src/App.jsx            # Live API-connected UI with audio playback
+│   ├── src/App.jsx            # 4-mode controls, language, style, model badge, routing hint
 │   ├── vite.config.js         # Dev server with proxy
 │   └── package.json           # Node dependencies
 ├── docs/                      # Documentation & PDFs
-├── tests/                     # Backend test suite
+├── tests/                     # 37 backend tests
 ├── README.md                  # Setup & run instructions
 ├── pyrefly.toml               # Pyrefly LSP configuration (points to backend/.conda)
 ├── start-docker.sh            # Helper script for Redis/PostgreSQL
 └── .env                       # Configuration (QUEUE_BACKEND=in_memory)
 ```
 
-### Recent Changes (Session: 2026-09-04)
+---
+
+### Recent Changes (Session 2: 2026-09-04 — Phase 1 Multi-Model TTS Router)
+
+4. **Integrated Higgs TTS 2 (3B, `bosonai/higgs-tts-2-3b-base`)**
+   - **Model**: Higgs TTS 2 is the successor to Higgs Audio V2. The 3B variant (~3 GB VRAM) fits the RTX 4050 (6.05 GB). Full 5.77B is available as `device_map="auto"` but exceeds VRAM.
+   - **Loading**: Loaded lazily via `transformers.pipeline("text-to-speech", model="bosonai/higgs-tts-2-3b-base")` — no separate pip package needed.
+   - **Failure handling**: `_higgs_failed = True` flag is set on OOM/missing, routing falls back to XTTS-v2.
+   - **Triggered by**: `mode=high_quality`, `quality=high`, or any non-English language code.
+
+5. **Integrated Dia-1.6B (`nari-labs/Dia-1.6B`) for multi-speaker dialogue**
+   - **Model**: Dia-1.6B by Nari Labs. Uses `[S1]`/`[S2]` speaker tags embedded in text.
+   - **Loading**: Via `transformers AutoModel`/`AutoProcessor` API. The `nari-tts` pip package was deliberately avoided because it pins `numpy>=2.2.4`, conflicting with the project's `numpy<2.0.0` requirement (for Coqui-TTS/Numba stability).
+   - **Failure handling**: `_dia_failed = True` flag; falls back to Kokoro (speaker tags stripped).
+   - **Triggered by**: `mode=dialogue`, `style=dialogue`, or text containing `[S1]`/`[S2]` tags.
+
+6. **Rebuilt `VoiceEngineRouter` with full routing decision matrix**
+   - Routing priority (highest first):
+     1. Dialogue signals → `dia-1.6b`
+     2. `mode=clone` → `xtts-v2`
+     3. `mode=high_quality` OR `quality=high` → `higgs-tts-2`
+     4. Non-English language → `higgs-tts-2`
+     5. `mode=fast` + English → `kokoro`
+   - All four backends have lazy-load with failure caching and graceful fallback.
+
+7. **Extended contracts and API**
+   - Added `SynthesisMode.HIGH_QUALITY` and `SynthesisMode.DIALOGUE` to contracts.
+   - Added `style: Optional[str]` to `AudioSynthesisRequest` (hint: `dialogue`, `expressive`, `narration`).
+   - Added `model_used: Optional[str]` to `SynthesisJobResponse` — backend returns the actual model key.
+   - Both `POST /api/v1/audio/synthesize` and `GET /api/v1/audio/synthesize/{task_id}` now return `modelUsed`.
+
+8. **Updated frontend (`App.jsx`)**
+   - 4-mode dropdown (Fast/Clone/High Quality/Dialogue) with inline hint text.
+   - Language selector with 8 options (multilingual options show `→ Higgs` routing hint).
+   - Style dropdown (`none`, `dialogue`, `expressive`, `narration`).
+   - Live "Router will select" prediction badge before submit.
+   - `ModelBadge` component shows which model was actually used post-generation.
+
+9. **Test suite expanded: 37 tests (all passing)**
+   - Added `RouterSelectionTests` (16 tests): covers all 4 models, all fallbacks, language routing, speaker tags, style routing.
+   - Added `KokoroSynthesisTests`, `HiggsLoadingTests`, `DiaLoadingTests`.
+   - All 20 original tests still pass.
+
+---
+
+### Recent Changes (Session 1: 2026-09-04)
 
 1. **Resolved LSP Missing Module `TTS.api` & Import Resolution**
    - **Root Cause**: Pyrefly LSP / IDE was defaulting to system Python 3.12 (`/usr/lib/python3/dist-packages` & `~/.local/lib/python3.12/site-packages`) where project packages were not installed, instead of `backend/.conda` (Python 3.10.21).
@@ -133,13 +178,16 @@ The repository currently contains an initial Developer 1 voice milestone with mo
 
 ### Phase 1 - Core TTS Engine
 
-- [x] Kokoro integration is present in the router.
-- [x] XTTS-v2 integration is present in the router.
-- [~] Add model selection by language, latency, and quality requirements (basic fast/clone routing exists; quality currently validates but does not select alternate models).
-- [x] Add structured synthesis responses with duration, sample rate, and output URI.
-- [x] Add repeatable tests without loading large models.
-- [ ] Integrate Higgs Audio V2 and Dia, or document a hardware/quantization/remote-inference decision.
-- [ ] Measure repeated warm-model latency; the current live Kokoro baseline is cold-start only.
+- [x] Kokoro integration is present in the router (fast, English, sub-second).
+- [x] XTTS-v2 integration is present in the router (clone mode, zero-shot voice cloning).
+- [x] Higgs TTS 2 (3B, `bosonai/higgs-tts-2-3b-base`) integrated for high_quality mode and multilingual synthesis.
+- [x] Dia-1.6B (`nari-labs/Dia-1.6B`) integrated for dialogue mode with [S1]/[S2] speaker tags.
+- [x] Automated model router: full routing decision matrix by mode, language, quality, and style signals.
+- [x] Graceful fallbacks: Higgs → XTTS-v2, Dia → Kokoro on load failure.
+- [x] Add structured synthesis responses with duration, sample rate, output URI, and model_used.
+- [x] Add repeatable tests without loading large models (37 tests, all pass).
+- [~] Measure repeated warm-model latency; the current live Kokoro baseline is cold-start only.
+- [~] Integrate Higgs Audio V2 full 5.77B — using 3B variant (fits RTX 4050); 5.77B exceeds VRAM.
 
 ### PDF Milestone 1 Acceptance Matrix
 
