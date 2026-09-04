@@ -30,8 +30,11 @@ class VoiceEngineRouter:
     Multi-Model TTS Orchestration Router (PDF Specification Section 5)
     Routes synthesis requests dynamically based on latency and quality needs.
     """
-    def __init__(self, device="cuda"):
-        self.device = device if torch.cuda.is_available() else "cpu"
+    def __init__(self, device: Optional[str] = None):
+        if device is not None:
+            self.device = device
+        else:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[Router Initialized] Processing Device: {self.device.upper()}")
         self.kokoro_pipeline = None
         self.xtts_model = None
@@ -59,17 +62,21 @@ class VoiceEngineRouter:
     def load_kokoro_realtime(self):
         """Loads Kokoro-82M for real-time sub-100ms streaming generation."""
         if self.kokoro_pipeline is None:
-            print("\n[Loading Model] Initializing Kokoro v1.0 (82M params) for Real-Time Mode...")
+            print(f"\n[Loading Model] Initializing Kokoro v1.0 (82M params) on device: {self.device.upper()}...")
             from kokoro import KPipeline
-            self.kokoro_pipeline = KPipeline(lang_code='a')  # 'a' = American English
+            self.kokoro_pipeline = KPipeline(lang_code='a', device=self.device)
             print(" -> Kokoro v1.0 loaded successfully.")
 
     def load_xtts_cloning(self):
         """Loads XTTS-v2 for Zero-Shot Voice Cloning from 30-60s audio samples."""
         if self.xtts_model is None:
-            print("\n[Loading Model] Initializing XTTS-v2 for Zero-Shot Voice Cloning...")
+            print(f"\n[Loading Model] Initializing XTTS-v2 for Zero-Shot Voice Cloning on {self.device.upper()}...")
             from TTS.api import TTS
-            self.xtts_model = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2").to(self.device)
+            self.xtts_model = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2")
+            if self.device == "cuda" and torch.cuda.is_available():
+                self.xtts_model = self.xtts_model.to("cuda")
+            else:
+                self.xtts_model = self.xtts_model.to("cpu")
             print(" -> XTTS-v2 loaded successfully.")
 
     def synthesize(

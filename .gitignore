@@ -8,7 +8,7 @@ env/*
 *.swp
 .DS_Store
 .env
-
+.venv
 *.pdf
 *.zip
 *.tar.gz
@@ -46,5 +46,8 @@ env/*
 *.exe.*/
 # Python virtual environment
 venv/
+.venv/
+.conda/
+backend/.conda/
 
 

@@ -12,7 +12,8 @@ if torch.cuda.is_available():
     print(f"GPU Model       : {torch.cuda.get_device_name(0)}")
     vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
     print(f"Dedicated VRAM  : {vram_gb:.2f} GB")
-    print("\n✅ STATUS: Environment is ready to build Milestone 1!")
+    print("\n✅ STATUS: Environment is ready with NVIDIA GPU hardware acceleration (CUDA enabled)!")
 else:
-    print("\n❌ STATUS: CUDA is NOT detected. Check NVIDIA Linux drivers.")
+    print("\nℹ️  STATUS: No NVIDIA GPU detected. Platform will run in CPU fallback mode.")
+    print("✅ STATUS: Environment is ready with CPU execution!")
 print("===========================================")
