@@ -19,6 +19,8 @@ class JobStatus(str, Enum):
 class SynthesisMode(str, Enum):
     FAST = "fast"
     CLONE = "clone"
+    HIGH_QUALITY = "high_quality"
+    DIALOGUE = "dialogue"
 
 
 class PhonemeTimestamp(BaseModel):
@@ -91,6 +93,10 @@ class AudioSynthesisRequest(BaseModel):
     mode: SynthesisMode = SynthesisMode.FAST
     language: str = Field(default="en", min_length=2, max_length=16)
     quality: str = Field(default="balanced", pattern="^(fast|balanced|high)$")
+    style: Optional[str] = Field(
+        default=None,
+        description="Optional style hint: 'dialogue', 'expressive', 'narration'",
+    )
     speaker_wav: Optional[str] = Field(default=None, alias="speakerWav")
     output_filename: str = Field(default="speech.wav", alias="outputFilename", min_length=1)
 
@@ -118,3 +124,4 @@ class SynthesisJobResponse(BaseModel):
 
     task_id: str = Field(alias="taskId")
     status: str
+    model_used: Optional[str] = Field(default=None, alias="modelUsed")

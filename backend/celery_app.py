@@ -50,13 +50,14 @@ def process_render_job(payload: dict) -> dict:
 
 @celery.task(name="avatar.synthesize_audio")
 def synthesize_audio(payload: dict) -> dict:
-    """Run the Developer 1 voice engine from a Celery worker."""
+    """Run the Developer 1 voice engine from a Celery task."""
     request = AudioSynthesisRequest.model_validate(payload)
     result = VoiceEngineRouter().synthesize(
         text=request.text,
         mode=request.mode.value,
         language=request.language,
         quality=request.quality,
+        style=request.style,
         speaker_wav=request.speaker_wav,
         output_filename=request.output_filename,
     )

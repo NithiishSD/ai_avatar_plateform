@@ -81,7 +81,11 @@ def create_synthesis_job(request: AudioSynthesisRequest) -> SynthesisJobResponse
         task_status = getattr(task, "status", "QUEUED")
         if task_status == "PENDING":
             task_status = "QUEUED"
-        return SynthesisJobResponse(taskId=task.id, status=task_status)
+        # For eager (in-memory) mode, task result is available immediately
+        model_used = None
+        if task_status == "SUCCESS" and hasattr(task, "result") and isinstance(task.result, dict):
+            model_used = task.result.get("model")
+        return SynthesisJobResponse(taskId=task.id, status=task_status, modelUsed=model_used)
     except Exception as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -102,6 +106,9 @@ def get_synthesis_job(task_id: str) -> SynthesisJobResponse:
             "REVOKED": "CANCELLED",
         }
         task_status = state_mapping.get(task.state, task.state)
-        return SynthesisJobResponse(taskId=task_id, status=task_status)
+        model_used = None
+        if task.state == "SUCCESS" and isinstance(task.result, dict):
+            model_used = task.result.get("model")
+        return SynthesisJobResponse(taskId=task_id, status=task_status, modelUsed=model_used)
     except Exception as error:
         return SynthesisJobResponse(taskId=task_id, status="UNKNOWN")

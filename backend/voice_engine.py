@@ -1,21 +1,49 @@
+"""
+VoiceEngineRouter — Multi-Model TTS Orchestration (Phase 1)
+============================================================
+Routing matrix:
+  fast        + English       → Kokoro-82M      (sub-second, real-time)
+  clone                       → XTTS-v2         (zero-shot voice cloning)
+  high_quality | quality=high → Higgs TTS 2     (MOS >4.0, multilingual)
+  non-English language        → Higgs TTS 2     (Kokoro is English-only)
+  dialogue    | style=dialogue → Dia-1.6B       (multi-speaker [S1]/[S2])
+  Higgs unavailable (OOM)     → XTTS-v2 fallback
+  Dia unavailable             → Kokoro fallback
+"""
+
 import os
 import time
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# pyrefly: ignore [missing-import]
 import torch
-# pyrefly: ignore [missing-import]
 import soundfile as sf
-# pyrefly: ignore [missing-import]
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 INPUT_DIR = PROJECT_ROOT / "inputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 INPUT_DIR.mkdir(exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Supported English language codes for Kokoro routing
+# ---------------------------------------------------------------------------
+_KOKORO_ENGLISH_CODES = {"en", "en-us", "en-gb", "en-au", "en-ca"}
+
+# ---------------------------------------------------------------------------
+# Higgs TTS 2 default voice preset (no reference audio required)
+# ---------------------------------------------------------------------------
+_HIGGS_DEFAULT_VOICE = "default"
+
+# ---------------------------------------------------------------------------
+# Dia speaker tag pattern — if text contains [S1] or [S2] triggers Dia
+# ---------------------------------------------------------------------------
+_DIA_SPEAKER_TAGS = {"[S1]", "[S2]", "[s1]", "[s2]"}
 
 
 @dataclass(frozen=True)
@@ -30,57 +58,303 @@ class SynthesisResult:
 
 class VoiceEngineRouter:
     """
-    Multi-Model TTS Orchestration Router (PDF Specification Section 5)
-    Routes synthesis requests dynamically based on latency and quality needs.
+    Intelligent Multi-Model TTS Orchestration Router.
+
+    Lazily loads each model on first use to keep startup fast.
+    All models are cached in instance attributes after first load.
     """
+
     def __init__(self, device: Optional[str] = None):
         if device is not None:
             self.device = device
         else:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[Router Initialized] Processing Device: {self.device.upper()}")
-        self.kokoro_pipeline = None
-        self.xtts_model = None
+
+        # Lazy-loaded model handles
+        self.kokoro_pipeline = None   # Kokoro-82M
+        self.xtts_model = None        # XTTS-v2
+        self._higgs_pipe = None       # Higgs TTS 2 (3B)
+        self._dia_model = None        # Dia-1.6B
+        self._dia_processor = None
+
+        # Track load failures to avoid retrying broken models
+        self._higgs_failed = False
+        self._dia_failed = False
+
+    # ------------------------------------------------------------------
+    # Model Selection — Routing Decision Matrix
+    # ------------------------------------------------------------------
 
     def select_model(
         self,
         mode: str = "fast",
         language: str = "en",
         quality: str = "balanced",
+        style: Optional[str] = None,
+        text: str = "",
     ) -> str:
-        """Select the first available model for the requested workload."""
-        normalized_language = language.lower().replace("_", "-")
+        """
+        Returns the canonical model key for the given request parameters.
+
+        Priority order:
+          1. Explicit dialogue mode / style or [S1]/[S2] tags → dia
+          2. Explicit clone mode → xtts-v2
+          3. Explicit high_quality mode OR quality=high → higgs-tts-2
+          4. Non-English language → higgs-tts-2
+          5. fast mode English → kokoro
+          6. Unknown mode → raise ValueError
+        """
+        normalized_lang = language.lower().replace("_", "-")
+
+        # 1. Dialogue detection
+        is_dialogue_mode = mode == "dialogue"
+        is_dialogue_style = (style or "").lower() in {"dialogue", "multi-speaker"}
+        has_speaker_tags = any(tag in text for tag in _DIA_SPEAKER_TAGS)
+
+        if is_dialogue_mode or is_dialogue_style or has_speaker_tags:
+            if self._dia_failed:
+                logger.warning("Dia unavailable — falling back to Kokoro for dialogue request")
+                return "kokoro"
+            return "dia-1.6b"
+
+        # 2. Voice cloning
         if mode == "clone":
             return "xtts-v2"
-        if mode != "fast":
-            raise ValueError("Invalid mode! Choose 'fast' or 'clone'.")
-        if quality not in {"fast", "balanced", "high"}:
-            raise ValueError("Invalid quality! Choose 'fast', 'balanced', or 'high'.")
-        if normalized_language not in {"en", "en-us", "en-gb"}:
-            raise ValueError(
-                "Kokoro currently supports English only; use mode='clone' for multilingual synthesis."
-            )
-        return "kokoro"
 
-    def load_kokoro_realtime(self):
+        # 3. Explicit high quality mode
+        if mode == "high_quality" or quality == "high":
+            if self._higgs_failed:
+                logger.warning("Higgs unavailable — falling back to XTTS-v2 for high_quality request")
+                return "xtts-v2"
+            return "higgs-tts-2"
+
+        # 4. Non-English → Higgs (Kokoro is English-only)
+        if normalized_lang not in _KOKORO_ENGLISH_CODES:
+            if self._higgs_failed:
+                raise ValueError(
+                    f"Language '{language}' requires Higgs TTS 2, but it failed to load. "
+                    "Use mode='clone' with XTTS-v2 for multilingual synthesis."
+                )
+            return "higgs-tts-2"
+
+        # 5. Fast English
+        if mode == "fast":
+            return "kokoro"
+
+        # 6. Unknown
+        raise ValueError(
+            f"Unsupported mode='{mode}'. "
+            "Valid modes: 'fast', 'clone', 'high_quality', 'dialogue'."
+        )
+
+    # ------------------------------------------------------------------
+    # Model Loaders (lazy, cached)
+    # ------------------------------------------------------------------
+
+    def load_kokoro_realtime(self) -> None:
         """Loads Kokoro-82M for real-time sub-100ms streaming generation."""
-        if self.kokoro_pipeline is None:
-            print(f"\n[Loading Model] Initializing Kokoro v1.0 (82M params) on device: {self.device.upper()}...")
-            from kokoro import KPipeline
-            self.kokoro_pipeline = KPipeline(lang_code='a', device=self.device)
-            print(" -> Kokoro v1.0 loaded successfully.")
+        if self.kokoro_pipeline is not None:
+            return
+        print(f"\n[Loading Model] Kokoro v1.0 (82M) on {self.device.upper()}...")
+        from kokoro import KPipeline
+        self.kokoro_pipeline = KPipeline(lang_code="a", device=self.device)
+        print(" -> Kokoro v1.0 loaded.")
 
-    def load_xtts_cloning(self):
-        """Loads XTTS-v2 for Zero-Shot Voice Cloning from 30-60s audio samples."""
-        if self.xtts_model is None:
-            print(f"\n[Loading Model] Initializing XTTS-v2 for Zero-Shot Voice Cloning on {self.device.upper()}...")
-            from TTS.api import TTS
-            self.xtts_model = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2")
-            if self.device == "cuda" and torch.cuda.is_available():
-                self.xtts_model = self.xtts_model.to("cuda")
-            else:
-                self.xtts_model = self.xtts_model.to("cpu")
-            print(" -> XTTS-v2 loaded successfully.")
+    def load_xtts_cloning(self) -> None:
+        """Loads XTTS-v2 for zero-shot voice cloning."""
+        if self.xtts_model is not None:
+            return
+        print(f"\n[Loading Model] XTTS-v2 on {self.device.upper()}...")
+        from TTS.api import TTS
+        self.xtts_model = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2")
+        if self.device == "cuda" and torch.cuda.is_available():
+            self.xtts_model = self.xtts_model.to("cuda")
+        else:
+            self.xtts_model = self.xtts_model.to("cpu")
+        print(" -> XTTS-v2 loaded.")
+
+    def load_higgs(self) -> bool:
+        """
+        Loads Higgs TTS 2 (3B, bosonai/higgs-tts-2-3b-base) via transformers pipeline.
+        Returns True on success, False on failure (OOM / missing).
+        Caches failure in self._higgs_failed to skip future attempts.
+        """
+        if self._higgs_pipe is not None:
+            return True
+        if self._higgs_failed:
+            return False
+
+        print(f"\n[Loading Model] Higgs TTS 2 (3B) on {self.device.upper()}...")
+        try:
+            from transformers import pipeline as hf_pipeline
+
+            device_arg = 0 if self.device == "cuda" else -1
+            self._higgs_pipe = hf_pipeline(
+                "text-to-speech",
+                model="bosonai/higgs-tts-2-3b-base",
+                device=device_arg,
+                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+            )
+            print(" -> Higgs TTS 2 (3B) loaded.")
+            return True
+        except Exception as exc:
+            logger.error("Higgs TTS 2 failed to load: %s", exc)
+            self._higgs_failed = True
+            print(f" -> [WARNING] Higgs TTS 2 load failed: {exc}")
+            return False
+
+    def load_dia(self) -> bool:
+        """
+        Loads Dia-1.6B (nari-labs/Dia-1.6B) via transformers AutoModel API.
+        Returns True on success, False on failure.
+        Caches failure in self._dia_failed.
+        """
+        if self._dia_model is not None:
+            return True
+        if self._dia_failed:
+            return False
+
+        print(f"\n[Loading Model] Dia-1.6B on {self.device.upper()}...")
+        try:
+            from transformers import AutoProcessor, AutoModel
+
+            model_id = "nari-labs/Dia-1.6B"
+            self._dia_processor = AutoProcessor.from_pretrained(model_id)
+            self._dia_model = AutoModel.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                device_map=self.device if self.device == "cuda" else None,
+            )
+            if self.device == "cpu":
+                self._dia_model = self._dia_model.to("cpu")
+            print(" -> Dia-1.6B loaded.")
+            return True
+        except Exception as exc:
+            logger.error("Dia-1.6B failed to load: %s", exc)
+            self._dia_failed = True
+            print(f" -> [WARNING] Dia-1.6B load failed: {exc}")
+            return False
+
+    # ------------------------------------------------------------------
+    # Synthesis Backends
+    # ------------------------------------------------------------------
+
+    def _synthesize_kokoro(self, text: str, output_path: Path) -> tuple[int, float]:
+        """Run Kokoro-82M synthesis. Returns (sample_rate, duration_seconds)."""
+        self.load_kokoro_realtime()
+        assert self.kokoro_pipeline is not None
+        print(f"\n[Kokoro] Synthesizing: '{text[:80]}...'")
+        generator = self.kokoro_pipeline(text, voice="af_heart", speed=1.0)
+        chunks = [audio for _, _, audio in generator]
+        if not chunks:
+            raise RuntimeError("Kokoro returned no audio chunks")
+        audio = np.concatenate(chunks)
+        sample_rate = 24000
+        sf.write(output_path, audio, sample_rate)
+        return sample_rate, len(audio) / sample_rate
+
+    def _synthesize_xtts(
+        self,
+        text: str,
+        output_path: Path,
+        speaker_wav: Optional[str],
+        language: str,
+    ) -> tuple[int, float]:
+        """Run XTTS-v2 voice cloning. Returns (sample_rate, duration_seconds)."""
+        if not speaker_wav or not os.path.exists(speaker_wav):
+            raise FileNotFoundError(
+                f"Voice cloning requires a reference audio file at '{speaker_wav}'. "
+                "Place a 30-60s WAV recording in inputs/voice_sample.wav"
+            )
+        self.load_xtts_cloning()
+        assert self.xtts_model is not None
+        print(f"\n[XTTS-v2] Cloning from '{speaker_wav}', text: '{text[:80]}...'")
+        lang_code = language.split("-")[0].lower()  # "en-US" → "en"
+        self.xtts_model.tts_to_file(
+            text=text,
+            speaker_wav=speaker_wav,
+            language=lang_code,
+            file_path=str(output_path),
+        )
+        sample_rate = 24000
+        duration = float(sf.info(output_path).duration)
+        return sample_rate, duration
+
+    def _synthesize_higgs(
+        self,
+        text: str,
+        output_path: Path,
+        speaker_wav: Optional[str] = None,
+    ) -> tuple[int, float]:
+        """
+        Run Higgs TTS 2 (3B) synthesis.
+        Supports optional speaker_wav for voice cloning.
+        Falls back to XTTS-v2 on load failure.
+        Returns (sample_rate, duration_seconds).
+        """
+        if not self.load_higgs():
+            print("[WARN] Higgs unavailable — falling back to XTTS-v2")
+            # Higgs fallback: use XTTS-v2 if speaker_wav provided, else Kokoro
+            if speaker_wav and os.path.exists(speaker_wav):
+                return self._synthesize_xtts(text, output_path, speaker_wav, "en")
+            return self._synthesize_kokoro(text, output_path)
+
+        print(f"\n[Higgs TTS 2] Synthesizing: '{text[:80]}...'")
+        result = self._higgs_pipe(text)  # type: ignore[call-arg]
+        audio_array = result["audio"]
+        sample_rate = result.get("sampling_rate", 24000)
+
+        # Ensure 1D float32 numpy array
+        if isinstance(audio_array, (list, tuple)):
+            audio_array = np.array(audio_array, dtype=np.float32)
+        if audio_array.ndim > 1:
+            audio_array = audio_array.squeeze()
+
+        sf.write(output_path, audio_array, sample_rate)
+        duration = len(audio_array) / sample_rate
+        return int(sample_rate), duration
+
+    def _synthesize_dia(
+        self,
+        text: str,
+        output_path: Path,
+    ) -> tuple[int, float]:
+        """
+        Run Dia-1.6B multi-speaker dialogue synthesis.
+        Text should use [S1] / [S2] speaker tags.
+        Falls back to Kokoro on load failure.
+        Returns (sample_rate, duration_seconds).
+        """
+        if not self.load_dia():
+            print("[WARN] Dia unavailable — falling back to Kokoro")
+            # Strip [S1]/[S2] tags before passing to Kokoro
+            clean_text = text
+            for tag in _DIA_SPEAKER_TAGS:
+                clean_text = clean_text.replace(tag, "")
+            clean_text = " ".join(clean_text.split())
+            return self._synthesize_kokoro(clean_text, output_path)
+
+        print(f"\n[Dia-1.6B] Dialogue synthesis: '{text[:80]}...'")
+        assert self._dia_model is not None
+        assert self._dia_processor is not None
+
+        # Tokenize using the Dia processor
+        inputs = self._dia_processor(text=text, return_tensors="pt")
+        inputs = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in inputs.items()}
+
+        with torch.no_grad():
+            output = self._dia_model.generate(**inputs)
+
+        audio_array = output.squeeze().cpu().numpy().astype(np.float32)
+        sample_rate = 44100  # Dia native output rate
+        sf.write(output_path, audio_array, sample_rate)
+        duration = len(audio_array) / sample_rate
+        return sample_rate, duration
+
+    # ------------------------------------------------------------------
+    # Main Public Interface
+    # ------------------------------------------------------------------
 
     def synthesize(
         self,
@@ -90,94 +364,117 @@ class VoiceEngineRouter:
         output_filename: str = "speech.wav",
         language: str = "en",
         quality: str = "balanced",
+        style: Optional[str] = None,
     ) -> SynthesisResult:
         """
-        Executes synthesis based on target mode:
-        - mode='fast': Real-time streaming via Kokoro-82M (<100ms target)
-        - mode='clone': Zero-shot voice cloning via XTTS-v2 (>90% similarity target)
+        Synthesize speech using the automatically selected model.
+
+        Parameters
+        ----------
+        text            : Text to synthesize. Use [S1]/[S2] tags for Dia dialogue.
+        mode            : 'fast' | 'clone' | 'high_quality' | 'dialogue'
+        speaker_wav     : Path to reference WAV (required for 'clone', optional for 'high_quality')
+        output_filename : Output filename under outputs/
+        language        : BCP-47 language code (e.g. 'en', 'es', 'fr', 'ja')
+        quality         : 'fast' | 'balanced' | 'high'
+        style           : Optional style hint ('dialogue', 'expressive', 'narration')
         """
         if not text.strip():
             raise ValueError("text must not be empty")
-        model_name = self.select_model(mode=mode, language=language, quality=quality)
+
+        model_key = self.select_model(
+            mode=mode,
+            language=language,
+            quality=quality,
+            style=style,
+            text=text,
+        )
+
         start_time = time.time()
         output_path = OUTPUT_DIR / output_filename
 
-        if mode == "fast":
-            self.load_kokoro_realtime()
-            assert self.kokoro_pipeline is not None
-            print(f"\n[Synthesizing - Real-time Mode] Generating audio for: '{text}'")
-            generator = self.kokoro_pipeline(text, voice='af_heart', speed=1.0)
-            
-            audio_chunks = [audio for _, _, audio in generator]
-            if not audio_chunks:
-                raise RuntimeError("Kokoro returned no audio chunks")
-            combined_audio = np.concatenate(audio_chunks)
-            sf.write(output_path, combined_audio, 24000)
-            sample_rate = 24000
-            duration_seconds = len(combined_audio) / sample_rate
+        print(
+            f"\n{'='*60}\n"
+            f"[VoiceEngine] mode={mode!r} lang={language!r} quality={quality!r} "
+            f"style={style!r} → model={model_key!r}\n"
+            f"{'='*60}"
+        )
 
-        elif mode == "clone":
-            if not speaker_wav or not os.path.exists(speaker_wav):
-                raise FileNotFoundError(
-                    f"❌ Voice cloning requires a reference audio file at '{speaker_wav}'. "
-                    "Please place a 30-60s .wav clip in inputs/voice_sample.wav!"
-                )
-            
-            self.load_xtts_cloning()
-            assert self.xtts_model is not None
-            print(f"\n[Synthesizing - Voice Clone Mode] Cloning speaker from '{speaker_wav}'...")
-            print(f" -> Input Text: '{text}'")
-            
-            # XTTS Zero-Shot Voice Generation
-            self.xtts_model.tts_to_file(
-                text=text,
-                speaker_wav=speaker_wav,
-                language="en",
-                file_path=output_path
+        if model_key == "kokoro":
+            sample_rate, duration = self._synthesize_kokoro(text, output_path)
+
+        elif model_key == "xtts-v2":
+            sample_rate, duration = self._synthesize_xtts(
+                text, output_path, speaker_wav, language
             )
-            sample_rate = 24000
-            duration_seconds = float(sf.info(output_path).duration)
+
+        elif model_key == "higgs-tts-2":
+            sample_rate, duration = self._synthesize_higgs(text, output_path, speaker_wav)
+
+        elif model_key == "dia-1.6b":
+            sample_rate, duration = self._synthesize_dia(text, output_path)
+
         else:
-            raise ValueError(f"Unsupported mode: {mode}")
+            raise ValueError(f"Internal error: unknown model key '{model_key}'")
 
         latency = (time.time() - start_time) * 1000
-        print("----------------------------------------------------------")
-        print(f"✅ SUCCESS: Audio saved to -> {os.path.abspath(output_path)}")
-        print(f"⏱️  Synthesis Latency: {latency:.2f} ms")
-        print("==========================================================")
+        print(f"\n✅ Audio saved → {os.path.abspath(output_path)}")
+        print(f"⏱  Latency: {latency:.0f} ms  |  Duration: {duration:.2f}s  |  Model: {model_key}")
+        print("=" * 60)
+
         return SynthesisResult(
             output_path=str(output_path),
             sample_rate=sample_rate,
-            duration_seconds=duration_seconds,
+            duration_seconds=duration,
             latency_ms=latency,
-            model=model_name,
+            model=model_key,
             mode=mode,
         )
 
 
-# ==========================================================
-# EXECUTION & BENCHMARK TEST
-# ==========================================================
+# ------------------------------------------------------------------
+# CLI Benchmark / Smoke Test
+# ------------------------------------------------------------------
 if __name__ == "__main__":
     router = VoiceEngineRouter()
 
-    # TEST 1: Real-Time Fast Synthesis (Kokoro-82M)
-    print("\n--- RUNNING TEST 1: REAL-TIME STREAMING TTS ---")
-    script_1 = "Hello! I am your AI avatar running real-time speech synthesis on your local GPU."
-    router.synthesize(text=script_1, mode="fast", output_filename="fast_speech.wav")
+    print("\n--- TEST 1: Kokoro fast (English) ---")
+    router.synthesize(
+        text="Hello! I am your AI avatar running real-time speech synthesis.",
+        mode="fast",
+        output_filename="test_kokoro.wav",
+    )
 
-    # TEST 2: Zero-Shot Voice Cloning (XTTS-v2)
-    print("\n--- RUNNING TEST 2: ZERO-SHOT VOICE CLONING ---")
-    reference_audio = "inputs/voice_sample.wav"
-    script_2 = "This audio was generated by cloning the target voice using zero-shot deep learning."
-    
-    if os.path.exists(reference_audio):
+    print("\n--- TEST 2: Higgs TTS 2 high_quality ---")
+    router.synthesize(
+        text="This is a high quality neural synthesis test using Higgs TTS 2.",
+        mode="high_quality",
+        output_filename="test_higgs.wav",
+    )
+
+    print("\n--- TEST 3: Dia-1.6B dialogue ---")
+    router.synthesize(
+        text="[S1] Good morning! How are you today? [S2] I am doing great, thank you!",
+        mode="dialogue",
+        output_filename="test_dia.wav",
+    )
+
+    print("\n--- TEST 4: Higgs multilingual (Spanish) ---")
+    router.synthesize(
+        text="Hola, soy tu avatar de inteligencia artificial.",
+        mode="fast",
+        language="es",
+        output_filename="test_higgs_spanish.wav",
+    )
+
+    reference = str(INPUT_DIR / "voice_sample.wav")
+    if os.path.exists(reference):
+        print("\n--- TEST 5: XTTS-v2 voice clone ---")
         router.synthesize(
-            text=script_2, 
-            mode="clone", 
-            speaker_wav=reference_audio, 
-            output_filename="cloned_speech.wav"
+            text="This audio was generated by cloning the target voice using zero-shot deep learning.",
+            mode="clone",
+            speaker_wav=reference,
+            output_filename="test_xtts_clone.wav",
         )
     else:
-        print(f"⚠️ SKIPPING TEST 2: '{reference_audio}' not found.")
-        print(" -> To run voice cloning, add a 30-60s .wav recording into the inputs/ directory!")
+        print(f"\n--- TEST 5: SKIPPED (no reference audio at {reference}) ---")
