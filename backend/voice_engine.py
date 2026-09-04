@@ -22,6 +22,8 @@ import torch
 import soundfile as sf
 import numpy as np
 
+from audio_utils import validate_and_convert_for_cloning, AudioValidationError
+
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -262,18 +264,31 @@ class VoiceEngineRouter:
         language: str,
     ) -> tuple[int, float]:
         """Run XTTS-v2 voice cloning. Returns (sample_rate, duration_seconds)."""
-        if not speaker_wav or not os.path.exists(speaker_wav):
+        if not speaker_wav:
             raise FileNotFoundError(
-                f"Voice cloning requires a reference audio file at '{speaker_wav}'. "
-                "Place a 30-60s WAV recording in inputs/voice_sample.wav"
+                "Voice cloning requires a reference audio file.\n"
+                "Place a WAV/MP3/FLAC recording (30–60 s) into the inputs/ folder, "
+                "then select it in the UI."
             )
+
+        speaker_path = Path(speaker_wav)
+        if not speaker_path.exists():
+            raise FileNotFoundError(
+                f"Reference audio not found: '{speaker_wav}'\n"
+                "Ensure the file is in the inputs/ folder and select it again."
+            )
+
+        # Validate + auto-convert to WAV 24 kHz mono (raises AudioValidationError on bad files)
+        converted_dir = speaker_path.parent / ".converted"
+        ready_path = validate_and_convert_for_cloning(speaker_path, converted_dir=converted_dir)
+
         self.load_xtts_cloning()
         assert self.xtts_model is not None
-        print(f"\n[XTTS-v2] Cloning from '{speaker_wav}', text: '{text[:80]}...'")
+        print(f"\n[XTTS-v2] Cloning from '{ready_path.name}', text: '{text[:80]}...'")
         lang_code = language.split("-")[0].lower()  # "en-US" → "en"
         self.xtts_model.tts_to_file(
             text=text,
-            speaker_wav=speaker_wav,
+            speaker_wav=str(ready_path),
             language=lang_code,
             file_path=str(output_path),
         )

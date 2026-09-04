@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import "./App.css";
 
 const API_BASE = "http://localhost:8000";
@@ -72,6 +72,7 @@ function App() {
   const [language, setLanguage]   = useState("en");
   const [quality, setQuality]     = useState("balanced");
   const [style, setStyle]         = useState("");
+  const [selectedSample, setSelectedSample] = useState("");
 
   const [backendStatus, setBackendStatus] = useState("Checking...");
   const [taskId, setTaskId]       = useState("");
@@ -82,6 +83,13 @@ function App() {
   const [error, setError]         = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [audioUrl, setAudioUrl]   = useState("");
+
+  // Voice samples from inputs/ folder (for clone mode)
+  const [voiceSamples, setVoiceSamples]       = useState([]);
+  const [samplesLoading, setSamplesLoading]   = useState(false);
+  const [samplesError, setSamplesError]       = useState("");
+  const [inputsDir, setInputsDir]             = useState("");
+  const [supportedFormats, setSupportedFormats] = useState([]);
 
   /* ---------- computed predicted model (client-side hint) ----------- */
   const predictedModel = (() => {
@@ -106,7 +114,34 @@ function App() {
     }
   };
 
+  /* ---------- voice sample scanning --------------------------------- */
+  const fetchSamples = useCallback(async () => {
+    setSamplesLoading(true);
+    setSamplesError("");
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/audio/samples`);
+      if (!res.ok) throw new Error(`Samples request failed: ${res.status}`);
+      const data = await res.json();
+      setVoiceSamples(data.samples ?? []);
+      setInputsDir(data.inputs_dir ?? "");
+      setSupportedFormats(data.supported_formats ?? []);
+      // Auto-select first sample if none selected
+      if (!selectedSample && data.samples?.length > 0) {
+        setSelectedSample(data.samples[0].path);
+      }
+    } catch (err) {
+      setSamplesError(err.message || "Could not load voice samples");
+    } finally {
+      setSamplesLoading(false);
+    }
+  }, [selectedSample]);
+
   useEffect(() => { checkBackend(); }, []);
+
+  // Fetch samples when mode switches to clone
+  useEffect(() => {
+    if (mode === "clone") fetchSamples();
+  }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---------- task status polling ----------------------------------- */
   useEffect(() => {
@@ -143,6 +178,15 @@ function App() {
     try {
       const body = { text, mode, language, quality };
       if (style) body.style = style;
+      // For clone mode, pass the selected input file path
+      if (mode === "clone") {
+        if (!selectedSample) {
+          throw new Error(
+            "No voice sample selected. Place a WAV/MP3/FLAC file in inputs/ and refresh the sample list."
+          );
+        }
+        body.speakerWav = selectedSample;
+      }
 
       const res = await fetch(`${API_BASE}/api/v1/audio/synthesize`, {
         method: "POST",
@@ -231,6 +275,102 @@ function App() {
                 {MODE_INFO[mode]?.hint}
               </span>
             </label>
+
+            {/* Clone mode — voice sample picker from inputs/ */}
+            {mode === "clone" && (
+              <div style={{
+                background: "#1e293b",
+                border: "1px solid #334155",
+                borderRadius: "10px",
+                padding: "14px",
+              }}>
+                <div style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: "10px",
+                }}>
+                  <span style={{ fontWeight: 600, fontSize: "0.85rem" }}>🎤 Voice Reference Sample</span>
+                  <button
+                    type="button"
+                    id="refresh-samples-btn"
+                    onClick={fetchSamples}
+                    disabled={samplesLoading}
+                    style={{
+                      background: "transparent",
+                      border: "1px solid #475569",
+                      color: "#94a3b8",
+                      borderRadius: "6px",
+                      padding: "3px 10px",
+                      fontSize: "0.75rem",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {samplesLoading ? "Scanning…" : "↻ Refresh"}
+                  </button>
+                </div>
+
+                {samplesError && (
+                  <div style={{ color: "#f87171", fontSize: "0.8rem", marginBottom: "8px" }}>
+                    {samplesError}
+                  </div>
+                )}
+
+                {voiceSamples.length === 0 && !samplesLoading ? (
+                  <div style={{ fontSize: "0.8rem", color: "#64748b", lineHeight: 1.6 }}>
+                    <strong style={{ color: "#f59e0b" }}>No audio files found in inputs/</strong><br />
+                    Place a recording in:<br />
+                    <code style={{ fontSize: "0.75rem", color: "#94a3b8" }}>{inputsDir || "…/inputs/"}</code><br />
+                    <span style={{ marginTop: "6px", display: "block" }}>
+                      Supported: {supportedFormats.join(", ") || "WAV, MP3, FLAC, OGG, M4A…"}
+                    </span>
+                    <span style={{ marginTop: "4px", display: "block", color: "#475569" }}>
+                      Ideal: 30–60 s of clean speech. Auto-converted to WAV 24 kHz.
+                    </span>
+                  </div>
+                ) : (
+                  <>
+                    <select
+                      id="sample-select"
+                      value={selectedSample}
+                      onChange={(e) => setSelectedSample(e.target.value)}
+                      style={{ marginBottom: "8px" }}
+                    >
+                      {voiceSamples.map((s) => (
+                        <option key={s.path} value={s.path}>
+                          {s.filename} ({s.duration_label}, {s.format.toUpperCase()})
+                        </option>
+                      ))}
+                    </select>
+
+                    {/* Selected sample details */}
+                    {(() => {
+                      const selected = voiceSamples.find((s) => s.path === selectedSample);
+                      if (!selected) return null;
+                      return (
+                        <div style={{
+                          display: "grid",
+                          gridTemplateColumns: "1fr 1fr 1fr",
+                          gap: "6px",
+                          fontSize: "0.72rem",
+                          color: "#94a3b8",
+                          marginTop: "6px",
+                        }}>
+                          <div>📏 {selected.duration_label}</div>
+                          <div>🎵 {selected.sample_rate > 0 ? `${(selected.sample_rate / 1000).toFixed(1)} kHz` : "—"}</div>
+                          <div>📁 {(selected.size_bytes / 1024).toFixed(0)} KB</div>
+                          <div style={{ gridColumn: "1/-1", marginTop: "2px" }}>
+                            {selected.ready_for_cloning
+                              ? <span style={{ color: "#4ade80" }}>✅ Ready (WAV 24 kHz mono)</span>
+                              : <span style={{ color: "#fbbf24" }}>⚡ Will auto-convert on synthesis</span>}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
+              </div>
+            )}
 
             <div className="grid-two">
               <label>

@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import List
 from dotenv import load_dotenv
 
 project_root = Path(__file__).resolve().parents[1]
@@ -14,7 +15,9 @@ from contracts import AudioSynthesisRequest, AvatarRenderJob, RenderJobResponse,
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
+from audio_utils import list_voice_samples, SUPPORTED_EXTENSIONS
 from job_queue import CeleryJobQueue, InMemoryJobQueue
 
 
@@ -36,6 +39,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+inputs_dir = project_root / "inputs"
+inputs_dir.mkdir(parents=True, exist_ok=True)
+
 outputs_dir = project_root / "outputs"
 outputs_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/outputs", StaticFiles(directory=str(outputs_dir)), name="outputs")
@@ -44,9 +50,65 @@ queue_backend = os.getenv("QUEUE_BACKEND", "in_memory").lower()
 job_queue = CeleryJobQueue() if queue_backend == "celery" else InMemoryJobQueue()
 
 
+# ---------------------------------------------------------------------------
+# Response models
+# ---------------------------------------------------------------------------
+class VoiceSampleInfo(BaseModel):
+    filename: str
+    path: str
+    duration_seconds: float
+    sample_rate: int
+    channels: int
+    format: str
+    size_bytes: int
+    ready_for_cloning: bool
+    duration_label: str
+
+
+class VoiceSamplesResponse(BaseModel):
+    samples: List[VoiceSampleInfo]
+    supported_formats: List[str]
+    inputs_dir: str
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "queueBackend": os.getenv("QUEUE_BACKEND", "in_memory")}
+
+
+# ---------------------------------------------------------------------------
+# Voice samples — used by UI to list available clone reference files
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/audio/samples", response_model=VoiceSamplesResponse)
+def list_samples() -> VoiceSamplesResponse:
+    """
+    Return all audio files found in the inputs/ directory.
+    Files are listed with format/duration metadata so the frontend
+    can display them and let the user pick one for voice cloning.
+    """
+    samples = list_voice_samples(inputs_dir)
+    return VoiceSamplesResponse(
+        samples=[
+            VoiceSampleInfo(
+                filename=s.filename,
+                path=s.path,
+                duration_seconds=round(s.duration_seconds, 2),
+                sample_rate=s.sample_rate,
+                channels=s.channels,
+                format=s.format,
+                size_bytes=s.size_bytes,
+                ready_for_cloning=s.ready_for_cloning,
+                duration_label=s.duration_label,
+            )
+            for s in samples
+        ],
+        supported_formats=sorted(SUPPORTED_EXTENSIONS),
+        inputs_dir=str(inputs_dir),
+    )
+
 
 
 @app.post(
