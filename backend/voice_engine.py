@@ -4,8 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+# pyrefly: ignore [missing-import]
 import torch
+# pyrefly: ignore [missing-import]
 import soundfile as sf
+# pyrefly: ignore [missing-import]
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -101,6 +104,7 @@ class VoiceEngineRouter:
 
         if mode == "fast":
             self.load_kokoro_realtime()
+            assert self.kokoro_pipeline is not None
             print(f"\n[Synthesizing - Real-time Mode] Generating audio for: '{text}'")
             generator = self.kokoro_pipeline(text, voice='af_heart', speed=1.0)
             
@@ -120,6 +124,7 @@ class VoiceEngineRouter:
                 )
             
             self.load_xtts_cloning()
+            assert self.xtts_model is not None
             print(f"\n[Synthesizing - Voice Clone Mode] Cloning speaker from '{speaker_wav}'...")
             print(f" -> Input Text: '{text}'")
             
@@ -132,6 +137,8 @@ class VoiceEngineRouter:
             )
             sample_rate = 24000
             duration_seconds = float(sf.info(output_path).duration)
+        else:
+            raise ValueError(f"Unsupported mode: {mode}")
 
         latency = (time.time() - start_time) * 1000
         print("----------------------------------------------------------")

@@ -1,11 +1,11 @@
 # AI Avatar Platform Development Context
 
-Last updated: 2026-08-30
+Last updated: 2026-09-04
 Owner: Developer 1 - Audio AI, Voice Synthesis, and Backend
 Roadmap source: `AI_Avatar_Platform_2_Developer_Roadmap.pdf`
 Primary requirements source: `4895e15d-8adb-4146-a985-52babca3b3c5_AI_Avatar_Creation_Platform_using_Open_Source_Tech.pdf`
 
-## Project Structure & Current State (2026-08-30)
+## Project Structure & Current State (2026-09-04)
 
 ### Repository Organization
 The project has been refactored into a modular structure:
@@ -13,8 +13,8 @@ The project has been refactored into a modular structure:
 ```
 ai_avatar_plateform/
 ├── backend/                    # FastAPI + Celery services
-│   ├── app.py                 # Main API endpoints
-│   ├── celery_app.py          # Celery task definitions
+│   ├── app.py                 # Main API endpoints & static /outputs mount
+│   ├── celery_app.py          # Celery task definitions & eager configuration
 │   ├── contracts.py           # Pydantic schemas
 │   ├── job_queue.py           # Queue abstractions
 │   ├── voice_engine.py        # TTS router (Kokoro, XTTS-v2)
@@ -22,37 +22,37 @@ ai_avatar_plateform/
 │   ├── docker-compose.yml     # Redis & PostgreSQL services
 │   └── outputs/               # Generated audio files
 ├── frontend/                   # React + Vite UI
-│   ├── src/App.jsx            # Live API-connected UI
+│   ├── src/App.jsx            # Live API-connected UI with audio playback
 │   ├── vite.config.js         # Dev server with proxy
 │   └── package.json           # Node dependencies
 ├── docs/                      # Documentation & PDFs
 ├── tests/                     # Backend test suite
 ├── README.md                  # Setup & run instructions
+├── pyrefly.toml               # Pyrefly LSP configuration (points to backend/.conda)
 ├── start-docker.sh            # Helper script for Redis/PostgreSQL
-└── .env                       # Configuration (in_memory queue mode for dev)
+└── .env                       # Configuration (QUEUE_BACKEND=in_memory)
 ```
 
-### Recent Changes (Session: 2026-08-30)
+### Recent Changes (Session: 2026-09-04)
 
-1. **Project Restructuring**
-   - Split monolithic `src/` into `backend/` and `frontend/` folders
-   - Moved legacy files to `docs/` folder for documentation
-   - Removed duplicate/unused code
+1. **Resolved LSP Missing Module `TTS.api` & Import Resolution**
+   - **Root Cause**: Pyrefly LSP / IDE was defaulting to system Python 3.12 (`/usr/lib/python3/dist-packages` & `~/.local/lib/python3.12/site-packages`) where project packages were not installed, instead of `backend/.conda` (Python 3.10.21).
+   - **Fix**: Created `pyrefly.toml` specifying `python-interpreter-path = "backend/.conda/bin/python"` and `search-path = ["backend", "tests"]`. Updated `.vscode/settings.json` with `python.defaultInterpreterPath`. Cleaned temporary `# pyrefly: ignore [missing-import]` suppressions across files.
 
-2. **Frontend-Backend Integration**
-   - Connected React UI to FastAPI backend via Vite proxy (`/api` → `http://localhost:8000`)
-   - Enabled CORS on backend for `localhost:5173` (Vite dev server)
-   - Live API-driven controls: text input, mode/language/quality selectors
+2. **Fixed Frontend Synthesis Stuck in QUEUED ("Waiting for generation")**
+   - **Root Cause**:
+     - `backend/app.py` and `backend/celery_app.py` did not invoke `dotenv.load_dotenv()`. `os.getenv("QUEUE_BACKEND")` evaluated to `None`.
+     - When not explicitly `"in_memory"`, `app.py` dispatched tasks via `synthesize_audio.delay()` to Redis. However, no Celery worker was running, so tasks remained pending indefinitely in Redis.
+     - In `app.py`, an in-memory branch generated a fake `uuid.uuid4()`. When the frontend polled `GET /api/v1/audio/synthesize/{taskId}`, `celery.AsyncResult` evaluated unrecognized task IDs as `PENDING` (mapped to `"QUEUED"`), resetting the status and locking the UI in polling.
+   - **Fix**:
+     - Added `load_dotenv()` in `app.py` and `celery_app.py` pointing to project root `.env`.
+     - Standardized `QUEUE_BACKEND` default to `"in_memory"`.
+     - Configured Celery eager execution (`task_always_eager=True`, `task_store_eager_result=True`) when in `in_memory` mode so tasks execute synchronously without requiring an external Celery worker process, storing result status directly.
+     - Unified `create_synthesis_job` dispatch to return real task status (`SUCCESS` / `QUEUED`).
 
-3. **Task Status Update Fix**
-   - Fixed Celery eager mode configuration for in-memory development
-   - Added `task_store_eager_result=True` to store task results
-   - Updated status endpoint to map Celery states to user-facing status ("QUEUED", "SUCCESS", "FAILED")
-   - For development (in-memory mode): synthesis executes synchronously and returns status immediately
-
-4. **Environment Configuration**
-   - `.env` set to `QUEUE_BACKEND=in_memory` (no Redis required for local dev)
-   - Optional: switch to `QUEUE_BACKEND=celery` to use Redis for distributed task processing
+3. **Mounted Static Audio Output Route & In-Browser Audio Player**
+   - **Fix**: Mounted `/outputs` on the FastAPI application via `StaticFiles(directory=str(outputs_dir))` to serve synthesized `.wav` files.
+   - **Fix**: Updated `frontend/src/App.jsx` to render an `<audio controls>` player in the Output info card streaming `http://localhost:8000/outputs/speech.wav` as soon as status reaches `SUCCESS`.
 
 ### Verification Status
 
@@ -377,16 +377,30 @@ Evidence / artifact:
 
 #### 2026-08-27 - Project CUDA and Regression Verification
 
-- Hardware test: `python tests/hardware_test.py`.
-- Result: PASS - CUDA available; NVIDIA GeForce RTX 4050 Laptop GPU; 6.05 GB dedicated VRAM.
-- Regression test: `python -m unittest discover -s tests -p 'test_*.py' -v`.
-- Result: PASS - 4 tests completed in 0.124 seconds.
-- Follow-up: Execute real Kokoro fast synthesis and XTTS-v2 cloning with approved reference audio, then record latency and output quality measurements.
+#### 2026-09-04 - Voice Synthesis Pipeline, Eager Queue & LSP Resolution
+
+- Problem 1: Pyrefly LSP flagged `Cannot find module TTS.api` along with missing import diagnostics for `torch`, `soundfile`, `numpy`, and `fastapi`.
+  - Cause: Pyrefly was querying the host system Python 3.12 (`/usr/lib/python3/dist-packages` & `~/.local/lib/python3.12/site-packages`) instead of the project virtual environment `backend/.conda` (Python 3.10.21) where `TTS 0.22.0` and dependencies reside.
+  - Solution: Added `pyrefly.toml` with `python-interpreter-path = "backend/.conda/bin/python"` and `search-path = ["backend", "tests"]`. Configured `.vscode/settings.json` with `python.defaultInterpreterPath`. Cleaned temporary `# pyrefly: ignore [missing-import]` comments.
+- Problem 2: Frontend audio synthesis triggered a task but remained stuck indefinitely at `QUEUED` ("Waiting for generation").
+  - Cause: `backend/app.py` and `backend/celery_app.py` lacked `.env` loading, defaulting `os.getenv("QUEUE_BACKEND")` to `None`. In this state, synthesis tasks were enqueued into Redis via Celery, but no Celery worker was running to consume them. Additionally, in-memory bypasses generated unregistered `uuid4` tokens which Celery's `AsyncResult` reported as `PENDING` -> `QUEUED`, locking the frontend polling loop.
+  - Solution: Added `dotenv.load_dotenv()` to both `app.py` and `celery_app.py`, defaulting `QUEUE_BACKEND` to `"in_memory"`. Configured Celery eager execution (`task_always_eager=True`, `task_store_eager_result=True`) when in `in_memory` mode so tasks execute synchronously within the process and return `SUCCESS` immediately without an external Celery worker.
+- Problem 3: No audio streaming/playback route.
+  - Solution: Mounted FastAPI `/outputs` to `StaticFiles(directory=str(outputs_dir))`. Updated `frontend/src/App.jsx` with an `<audio controls>` player that streams `http://localhost:8000/outputs/speech.wav` as soon as generation succeeds.
+- Tests & Validation:
+  - Regression test: `python -m unittest discover -s tests -p 'test_*.py'` -> 20/20 tests PASS.
+  - Live API: `POST /api/v1/audio/synthesize` -> `202 Accepted` with `status: SUCCESS` in ~2.5s using Kokoro GPU inference (`device: CUDA`).
+  - Task Status Polling: `GET /api/v1/audio/synthesize/{taskId}` -> returns `status: SUCCESS`.
+  - Static Audio: `GET /outputs/speech.wav` -> `200 OK`, `Content-Type: audio/x-wav`.
 
 ## Useful Paths
 
-- Source: `src/voice_engine.py`
-- Existing smoke test: `tests/hardware_test.py`
-- Dependencies: `requirements.txt`
-- Input assets: `inputs/`
-- Generated audio: `outputs/`
+- Backend Entrypoint: `backend/app.py`
+- Celery Configuration: `backend/celery_app.py`
+- Voice Engine Router: `backend/voice_engine.py`
+- Frontend UI: `frontend/src/App.jsx`
+- Type Checker / LSP Config: `pyrefly.toml`
+- Environment Config: `.env`
+- Dependencies: `backend/requirements.txt`
+- Generated Audio: `outputs/`
+

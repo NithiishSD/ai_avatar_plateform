@@ -1,0 +1,9 @@
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
+]
+python-interpreter-path = "backend/.conda/bin/python"
+search-path = [
+    "backend",
+    "tests",
+]

@@ -37,6 +37,7 @@ function App() {
   const [jobStatus, setJobStatus] = useState("idle");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [audioUrl, setAudioUrl] = useState("");
 
   const checkBackend = async () => {
     try {
@@ -66,6 +67,9 @@ function App() {
         const payload = await response.json();
         console.log("Status update:", payload);
         setTaskStatus(payload.status);
+        if (payload.status === "SUCCESS") {
+          setAudioUrl(`${API_BASE}/outputs/speech.wav?t=${Date.now()}`);
+        }
       } catch (err) {
         console.error("Status check error:", err);
         setError(err.message || "Could not poll task status");
@@ -78,6 +82,7 @@ function App() {
   const handleSynthesize = async (event) => {
     event.preventDefault();
     setError("");
+    setAudioUrl("");
     setIsSubmitting(true);
 
     try {
@@ -103,7 +108,11 @@ function App() {
       }
 
       setTaskId(payload.taskId);
-      setTaskStatus(payload.status || "QUEUED");
+      const newStatus = payload.status || "QUEUED";
+      setTaskStatus(newStatus);
+      if (newStatus === "SUCCESS") {
+        setAudioUrl(`${API_BASE}/outputs/speech.wav?t=${Date.now()}`);
+      }
     } catch (err) {
       console.error("Synthesis error:", err);
       setError(err.message || "Could not start synthesis");
@@ -235,7 +244,25 @@ function App() {
 
           <div className="info-card">
             <label>Output</label>
-            <strong>{taskStatus === "SUCCESS" ? "Audio file created" : "Waiting for generation"}</strong>
+            <strong>
+              {taskStatus === "SUCCESS"
+                ? "Audio generated successfully"
+                : taskStatus === "FAILED"
+                ? "Generation failed"
+                : taskStatus === "QUEUED" || taskStatus === "PROCESSING"
+                ? "Generating speech..."
+                : "Waiting for generation"}
+            </strong>
+            {audioUrl ? (
+              <div style={{ marginTop: "0.75rem" }}>
+                <audio controls src={audioUrl} style={{ width: "100%" }}>
+                  Your browser does not support audio playback.
+                </audio>
+                <div style={{ marginTop: "0.35rem", fontSize: "0.8rem", color: "#9ca3af" }}>
+                  File: outputs/speech.wav
+                </div>
+              </div>
+            ) : null}
           </div>
         </section>
       </main>

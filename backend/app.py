@@ -1,9 +1,19 @@
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+project_root = Path(__file__).resolve().parents[1]
+dotenv_path = project_root / ".env"
+if dotenv_path.exists():
+    load_dotenv(dotenv_path=dotenv_path)
+else:
+    load_dotenv()
 
 from celery_app import celery, synthesize_audio
 from contracts import AudioSynthesisRequest, AvatarRenderJob, RenderJobResponse, SynthesisJobResponse
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from job_queue import CeleryJobQueue, InMemoryJobQueue
 
@@ -25,7 +35,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-job_queue = CeleryJobQueue() if os.getenv("QUEUE_BACKEND") == "celery" else InMemoryJobQueue()
+
+outputs_dir = project_root / "outputs"
+outputs_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/outputs", StaticFiles(directory=str(outputs_dir)), name="outputs")
+
+queue_backend = os.getenv("QUEUE_BACKEND", "in_memory").lower()
+job_queue = CeleryJobQueue() if queue_backend == "celery" else InMemoryJobQueue()
 
 
 @app.get("/health")
@@ -61,31 +77,11 @@ def get_render_job(job_id: str) -> RenderJobResponse:
 )
 def create_synthesis_job(request: AudioSynthesisRequest) -> SynthesisJobResponse:
     try:
-        # For in-memory development mode, run synchronously
-        if os.getenv("QUEUE_BACKEND") == "in_memory":
-            from voice_engine import VoiceEngineRouter
-            import uuid
-            
-            task_id = str(uuid.uuid4())
-            try:
-                router = VoiceEngineRouter()
-                router.synthesize(
-                    text=request.text,
-                    mode=request.mode.value,
-                    language=request.language,
-                    quality=request.quality,
-                    speaker_wav=request.speaker_wav,
-                    output_filename=request.output_filename,
-                )
-                # Synthesis succeeded
-                return SynthesisJobResponse(taskId=task_id, status="SUCCESS")
-            except Exception as e:
-                # Synthesis failed
-                return SynthesisJobResponse(taskId=task_id, status="FAILED")
-        else:
-            # For production, use async Celery task
-            task = synthesize_audio.delay(request.model_dump(by_alias=True, mode="json"))
-            return SynthesisJobResponse(taskId=task.id, status="QUEUED")
+        task = synthesize_audio.delay(request.model_dump(by_alias=True, mode="json"))
+        task_status = getattr(task, "status", "QUEUED")
+        if task_status == "PENDING":
+            task_status = "QUEUED"
+        return SynthesisJobResponse(taskId=task.id, status=task_status)
     except Exception as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -97,7 +93,6 @@ def create_synthesis_job(request: AudioSynthesisRequest) -> SynthesisJobResponse
 def get_synthesis_job(task_id: str) -> SynthesisJobResponse:
     try:
         task = celery.AsyncResult(task_id)
-        # Map Celery states to user-facing states
         state_mapping = {
             "PENDING": "QUEUED",
             "STARTED": "PROCESSING",
@@ -109,6 +104,4 @@ def get_synthesis_job(task_id: str) -> SynthesisJobResponse:
         task_status = state_mapping.get(task.state, task.state)
         return SynthesisJobResponse(taskId=task_id, status=task_status)
     except Exception as error:
-        # For in-memory mode, task won't be found in Celery, but that's okay
-        # Return the status as-is or a default
         return SynthesisJobResponse(taskId=task_id, status="UNKNOWN")

@@ -1,14 +1,23 @@
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 
-# pyrefly: ignore [missing-import]
+project_root = Path(__file__).resolve().parents[1]
+dotenv_path = project_root / ".env"
+if dotenv_path.exists():
+    load_dotenv(dotenv_path=dotenv_path)
+else:
+    load_dotenv()
+
 from celery import Celery
 
 from contracts import AudioSynthesisRequest, AvatarRenderJob
 from voice_engine import VoiceEngineRouter
 
 
-# Use in-memory backend for local development (no Redis required)
-if os.getenv("QUEUE_BACKEND") == "in_memory":
+is_in_memory = os.getenv("QUEUE_BACKEND", "in_memory").lower() != "celery"
+
+if is_in_memory:
     celery = Celery(
         "avatar_platform",
         broker="memory://",
@@ -27,8 +36,8 @@ celery.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
-    task_always_eager=os.getenv("QUEUE_BACKEND") == "in_memory",
-    task_store_eager_result=os.getenv("QUEUE_BACKEND") == "in_memory",
+    task_always_eager=is_in_memory,
+    task_store_eager_result=is_in_memory,
 )
 
 
