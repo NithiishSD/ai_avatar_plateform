@@ -60,6 +60,7 @@ class CeleryJobQueue:
         stored_job = self._redis.get(self._key(job_id))
         if stored_job is None:
             return None
+        assert isinstance(stored_job, (str, bytes))
         payload = json.loads(stored_job)
         return QueuedJob(
             job=AvatarRenderJob.model_validate(payload["job"]),

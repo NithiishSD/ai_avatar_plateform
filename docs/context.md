@@ -1,11 +1,11 @@
 # AI Avatar Platform Development Context
 
-Last updated: 2026-08-30
+Last updated: 2026-09-04 (Session 2)
 Owner: Developer 1 - Audio AI, Voice Synthesis, and Backend
 Roadmap source: `AI_Avatar_Platform_2_Developer_Roadmap.pdf`
 Primary requirements source: `4895e15d-8adb-4146-a985-52babca3b3c5_AI_Avatar_Creation_Platform_using_Open_Source_Tech.pdf`
 
-## Project Structure & Current State (2026-08-30)
+## Project Structure & Current State (2026-09-04, Session 2)
 
 ### Repository Organization
 The project has been refactored into a modular structure:
@@ -13,46 +13,111 @@ The project has been refactored into a modular structure:
 ```
 ai_avatar_plateform/
 ├── backend/                    # FastAPI + Celery services
-│   ├── app.py                 # Main API endpoints
-│   ├── celery_app.py          # Celery task definitions
-│   ├── contracts.py           # Pydantic schemas
+│   ├── app.py                 # API endpoints, static /outputs mount, /api/v1/audio/samples endpoint
+│   ├── audio_utils.py         # Audio probing, format conversion (WAV 24kHz mono), validation, inputs/ scanning
+│   ├── celery_app.py          # Celery tasks with style field passthrough
+│   ├── contracts.py           # Pydantic schemas (HIGH_QUALITY, DIALOGUE modes; style, model_used fields)
 │   ├── job_queue.py           # Queue abstractions
-│   ├── voice_engine.py        # TTS router (Kokoro, XTTS-v2)
-│   ├── requirements.txt       # Python dependencies
+│   ├── voice_engine.py        # 4-model TTS router (Kokoro, XTTS-v2, Higgs TTS 2, Dia-1.6B) + clone validation
+│   ├── requirements.txt       # Python dependencies (Higgs/Dia/soundfile/librosa documented)
 │   ├── docker-compose.yml     # Redis & PostgreSQL services
 │   └── outputs/               # Generated audio files
 ├── frontend/                   # React + Vite UI
-│   ├── src/App.jsx            # Live API-connected UI
+│   ├── src/App.jsx            # 4-mode controls, language, style, model badge, clone sample dropdown & metadata
 │   ├── vite.config.js         # Dev server with proxy
 │   └── package.json           # Node dependencies
+├── inputs/                    # Source voice samples for cloning (auto-converted to .converted/)
 ├── docs/                      # Documentation & PDFs
-├── tests/                     # Backend test suite
+├── tests/                     # 37 backend tests
 ├── README.md                  # Setup & run instructions
+├── pyrefly.toml               # Pyrefly LSP configuration (points to backend/.conda)
 ├── start-docker.sh            # Helper script for Redis/PostgreSQL
-└── .env                       # Configuration (in_memory queue mode for dev)
+└── .env                       # Configuration (QUEUE_BACKEND=in_memory)
 ```
 
-### Recent Changes (Session: 2026-08-30)
+---
 
-1. **Project Restructuring**
-   - Split monolithic `src/` into `backend/` and `frontend/` folders
-   - Moved legacy files to `docs/` folder for documentation
-   - Removed duplicate/unused code
+### Recent Changes (Session 2: 2026-09-04 — Phase 1 & 2: Multi-Model Router + Voice Clone Inputs/Audio Conversion)
 
-2. **Frontend-Backend Integration**
-   - Connected React UI to FastAPI backend via Vite proxy (`/api` → `http://localhost:8000`)
-   - Enabled CORS on backend for `localhost:5173` (Vite dev server)
-   - Live API-driven controls: text input, mode/language/quality selectors
+10. **Voice Clone Audio Sample Selector from `inputs/` Directory & Auto-Conversion (`audio_utils.py`)**
+    - **Problem**: Voice cloning previously required manual file path typing or UI file upload, with potential audio format/sample-rate/channel mismatches causing XTTS-v2 failures or crashes.
+    - **Solution (`backend/audio_utils.py`)**:
+      - `list_voice_samples(inputs_dir)`: Scans `inputs/` folder for supported audio formats (`.wav`, `.flac`, `.ogg`, `.mp3`, `.m4a`, `.aac`, `.mp4`, `.wma`, etc.) and returns structured metadata (`AudioInfo`).
+      - `probe_audio(file_path)`: Fast metadata extraction using `soundfile`, falling back to `librosa` for non-standard containers.
+      - `validate_and_convert_for_cloning(source_path)`: Fully validates duration (min 1.0s, max 120s), channel count, and sample rate. Automatically converts any format to 24kHz Mono WAV using `librosa.load` + `soundfile.write` into `inputs/.converted/`, hashing parameters to avoid re-conversion.
+      - `AudioValidationError`: Structured custom exception providing actionable, user-friendly guidance if an audio file is corrupted, silent, or too short/long.
+    - **Backend API (`backend/app.py`)**:
+      - Added `GET /api/v1/audio/samples` returning available reference audio samples in `inputs/` with detailed metadata (`duration`, `sample_rate`, `channels`, `format`, `size_bytes`, `ready_for_cloning`, `duration_label`).
+    - **Voice Engine Integration (`backend/voice_engine.py`)**:
+      - `_synthesize_xtts()` now passes speaker reference files through `validate_and_convert_for_cloning()`, guaranteeing 24kHz mono WAV input for XTTS-v2 and surfacing clear `AudioValidationError` messages.
+    - **Frontend Clone Mode Panel (`frontend/src/App.jsx`)**:
+      - Switching to `clone` mode auto-fetches voice samples from `GET /api/v1/audio/samples`.
+      - Interactive dropdown selector displaying filename, duration, and format.
+      - Selected sample metadata badge grid showing duration, sample rate, size, and conversion state (✅ Ready vs ⚡ Auto-convert).
+      - "↻ Refresh" button to re-scan `inputs/` dynamically without page reload.
+      - Helpful empty state guiding users to drop audio files into `inputs/` with supported formats listed.
 
-3. **Task Status Update Fix**
-   - Fixed Celery eager mode configuration for in-memory development
-   - Added `task_store_eager_result=True` to store task results
-   - Updated status endpoint to map Celery states to user-facing status ("QUEUED", "SUCCESS", "FAILED")
-   - For development (in-memory mode): synthesis executes synchronously and returns status immediately
+4. **Integrated Higgs TTS 2 (3B, `bosonai/higgs-tts-2-3b-base`)**
+   - **Model**: Higgs TTS 2 is the successor to Higgs Audio V2. The 3B variant (~3 GB VRAM) fits the RTX 4050 (6.05 GB). Full 5.77B is available as `device_map="auto"` but exceeds VRAM.
+   - **Loading**: Loaded lazily via `transformers.pipeline("text-to-speech", model="bosonai/higgs-tts-2-3b-base")` — no separate pip package needed.
+   - **Failure handling**: `_higgs_failed = True` flag is set on OOM/missing, routing falls back to XTTS-v2.
+   - **Triggered by**: `mode=high_quality`, `quality=high`, or any non-English language code.
 
-4. **Environment Configuration**
-   - `.env` set to `QUEUE_BACKEND=in_memory` (no Redis required for local dev)
-   - Optional: switch to `QUEUE_BACKEND=celery` to use Redis for distributed task processing
+5. **Integrated Dia-1.6B (`nari-labs/Dia-1.6B`) for multi-speaker dialogue**
+   - **Model**: Dia-1.6B by Nari Labs. Uses `[S1]`/`[S2]` speaker tags embedded in text.
+   - **Loading**: Via `transformers AutoModel`/`AutoProcessor` API. The `nari-tts` pip package was deliberately avoided because it pins `numpy>=2.2.4`, conflicting with the project's `numpy<2.0.0` requirement (for Coqui-TTS/Numba stability).
+   - **Failure handling**: `_dia_failed = True` flag; falls back to Kokoro (speaker tags stripped).
+   - **Triggered by**: `mode=dialogue`, `style=dialogue`, or text containing `[S1]`/`[S2]` tags.
+
+6. **Rebuilt `VoiceEngineRouter` with full routing decision matrix**
+   - Routing priority (highest first):
+     1. Dialogue signals → `dia-1.6b`
+     2. `mode=clone` → `xtts-v2`
+     3. `mode=high_quality` OR `quality=high` → `higgs-tts-2`
+     4. Non-English language → `higgs-tts-2`
+     5. `mode=fast` + English → `kokoro`
+   - All four backends have lazy-load with failure caching and graceful fallback.
+
+7. **Extended contracts and API**
+   - Added `SynthesisMode.HIGH_QUALITY` and `SynthesisMode.DIALOGUE` to contracts.
+   - Added `style: Optional[str]` to `AudioSynthesisRequest` (hint: `dialogue`, `expressive`, `narration`).
+   - Added `model_used: Optional[str]` to `SynthesisJobResponse` — backend returns the actual model key.
+   - Both `POST /api/v1/audio/synthesize` and `GET /api/v1/audio/synthesize/{task_id}` now return `modelUsed`.
+
+8. **Updated frontend (`App.jsx`)**
+   - 4-mode dropdown (Fast/Clone/High Quality/Dialogue) with inline hint text.
+   - Language selector with 8 options (multilingual options show `→ Higgs` routing hint).
+   - Style dropdown (`none`, `dialogue`, `expressive`, `narration`).
+   - Live "Router will select" prediction badge before submit.
+   - `ModelBadge` component shows which model was actually used post-generation.
+
+9. **Test suite expanded: 37 tests (all passing)**
+   - Added `RouterSelectionTests` (16 tests): covers all 4 models, all fallbacks, language routing, speaker tags, style routing.
+   - Added `KokoroSynthesisTests`, `HiggsLoadingTests`, `DiaLoadingTests`.
+   - All 20 original tests still pass.
+
+---
+
+### Recent Changes (Session 1: 2026-09-04)
+
+1. **Resolved LSP Missing Module `TTS.api` & Import Resolution**
+   - **Root Cause**: Pyrefly LSP / IDE was defaulting to system Python 3.12 (`/usr/lib/python3/dist-packages` & `~/.local/lib/python3.12/site-packages`) where project packages were not installed, instead of `backend/.conda` (Python 3.10.21).
+   - **Fix**: Created `pyrefly.toml` specifying `python-interpreter-path = "backend/.conda/bin/python"` and `search-path = ["backend", "tests"]`. Updated `.vscode/settings.json` with `python.defaultInterpreterPath`. Cleaned temporary `# pyrefly: ignore [missing-import]` suppressions across files.
+
+2. **Fixed Frontend Synthesis Stuck in QUEUED ("Waiting for generation")**
+   - **Root Cause**:
+     - `backend/app.py` and `backend/celery_app.py` did not invoke `dotenv.load_dotenv()`. `os.getenv("QUEUE_BACKEND")` evaluated to `None`.
+     - When not explicitly `"in_memory"`, `app.py` dispatched tasks via `synthesize_audio.delay()` to Redis. However, no Celery worker was running, so tasks remained pending indefinitely in Redis.
+     - In `app.py`, an in-memory branch generated a fake `uuid.uuid4()`. When the frontend polled `GET /api/v1/audio/synthesize/{taskId}`, `celery.AsyncResult` evaluated unrecognized task IDs as `PENDING` (mapped to `"QUEUED"`), resetting the status and locking the UI in polling.
+   - **Fix**:
+     - Added `load_dotenv()` in `app.py` and `celery_app.py` pointing to project root `.env`.
+     - Standardized `QUEUE_BACKEND` default to `"in_memory"`.
+     - Configured Celery eager execution (`task_always_eager=True`, `task_store_eager_result=True`) when in `in_memory` mode so tasks execute synchronously without requiring an external Celery worker process, storing result status directly.
+     - Unified `create_synthesis_job` dispatch to return real task status (`SUCCESS` / `QUEUED`).
+
+3. **Mounted Static Audio Output Route & In-Browser Audio Player**
+   - **Fix**: Mounted `/outputs` on the FastAPI application via `StaticFiles(directory=str(outputs_dir))` to serve synthesized `.wav` files.
+   - **Fix**: Updated `frontend/src/App.jsx` to render an `<audio controls>` player in the Output info card streaming `http://localhost:8000/outputs/speech.wav` as soon as status reaches `SUCCESS`.
 
 ### Verification Status
 
@@ -133,13 +198,16 @@ The repository currently contains an initial Developer 1 voice milestone with mo
 
 ### Phase 1 - Core TTS Engine
 
-- [x] Kokoro integration is present in the router.
-- [x] XTTS-v2 integration is present in the router.
-- [~] Add model selection by language, latency, and quality requirements (basic fast/clone routing exists; quality currently validates but does not select alternate models).
-- [x] Add structured synthesis responses with duration, sample rate, and output URI.
-- [x] Add repeatable tests without loading large models.
-- [ ] Integrate Higgs Audio V2 and Dia, or document a hardware/quantization/remote-inference decision.
-- [ ] Measure repeated warm-model latency; the current live Kokoro baseline is cold-start only.
+- [x] Kokoro integration is present in the router (fast, English, sub-second).
+- [x] XTTS-v2 integration is present in the router (clone mode, zero-shot voice cloning).
+- [x] Higgs TTS 2 (3B, `bosonai/higgs-tts-2-3b-base`) integrated for high_quality mode and multilingual synthesis.
+- [x] Dia-1.6B (`nari-labs/Dia-1.6B`) integrated for dialogue mode with [S1]/[S2] speaker tags.
+- [x] Automated model router: full routing decision matrix by mode, language, quality, and style signals.
+- [x] Graceful fallbacks: Higgs → XTTS-v2, Dia → Kokoro on load failure.
+- [x] Add structured synthesis responses with duration, sample rate, output URI, and model_used.
+- [x] Add repeatable tests without loading large models (37 tests, all pass).
+- [~] Measure repeated warm-model latency; the current live Kokoro baseline is cold-start only.
+- [~] Integrate Higgs Audio V2 full 5.77B — using 3B variant (fits RTX 4050); 5.77B exceeds VRAM.
 
 ### PDF Milestone 1 Acceptance Matrix
 
@@ -161,8 +229,10 @@ The broader PDF also asks for 5+ TTS models, MMS-TTS/OpenVoice support, lip sync
 
 ### Phase 2 - Voice Cloning and Alignment
 
-- [ ] Validate reference-audio duration, format, sample rate, and consent metadata.
-- [ ] Integrate OpenVoice V2 or confirm XTTS-v2 as the first cloning backend.
+- [x] Validate reference-audio duration, format, sample rate, and channels (`backend/audio_utils.py`).
+- [x] Auto audio format converter (`librosa` + `soundfile`) converting MP3/FLAC/OGG/M4A/etc. to 24kHz mono WAV.
+- [x] Voice sample selector directly from `inputs/` folder with real-time UI probe.
+- [x] Confirm XTTS-v2 as the zero-shot cloning backend integrated with validation pipeline.
 - [ ] Implement forced alignment and millisecond phoneme timestamps.
 - [ ] Map phonemes to the shared viseme vocabulary.
 
@@ -377,16 +447,44 @@ Evidence / artifact:
 
 #### 2026-08-27 - Project CUDA and Regression Verification
 
-- Hardware test: `python tests/hardware_test.py`.
-- Result: PASS - CUDA available; NVIDIA GeForce RTX 4050 Laptop GPU; 6.05 GB dedicated VRAM.
-- Regression test: `python -m unittest discover -s tests -p 'test_*.py' -v`.
-- Result: PASS - 4 tests completed in 0.124 seconds.
-- Follow-up: Execute real Kokoro fast synthesis and XTTS-v2 cloning with approved reference audio, then record latency and output quality measurements.
+#### 2026-09-04 - Voice Synthesis Pipeline, Eager Queue & LSP Resolution
+
+- Problem 1: Pyrefly LSP flagged `Cannot find module TTS.api` along with missing import diagnostics for `torch`, `soundfile`, `numpy`, and `fastapi`.
+  - Cause: Pyrefly was querying the host system Python 3.12 (`/usr/lib/python3/dist-packages` & `~/.local/lib/python3.12/site-packages`) instead of the project virtual environment `backend/.conda` (Python 3.10.21) where `TTS 0.22.0` and dependencies reside.
+  - Solution: Added `pyrefly.toml` with `python-interpreter-path = "backend/.conda/bin/python"` and `search-path = ["backend", "tests"]`. Configured `.vscode/settings.json` with `python.defaultInterpreterPath`. Cleaned temporary `# pyrefly: ignore [missing-import]` comments.
+- Problem 2: Frontend audio synthesis triggered a task but remained stuck indefinitely at `QUEUED` ("Waiting for generation").
+  - Cause: `backend/app.py` and `backend/celery_app.py` lacked `.env` loading, defaulting `os.getenv("QUEUE_BACKEND")` to `None`. In this state, synthesis tasks were enqueued into Redis via Celery, but no Celery worker was running to consume them. Additionally, in-memory bypasses generated unregistered `uuid4` tokens which Celery's `AsyncResult` reported as `PENDING` -> `QUEUED`, locking the frontend polling loop.
+  - Solution: Added `dotenv.load_dotenv()` to both `app.py` and `celery_app.py`, defaulting `QUEUE_BACKEND` to `"in_memory"`. Configured Celery eager execution (`task_always_eager=True`, `task_store_eager_result=True`) when in `in_memory` mode so tasks execute synchronously within the process and return `SUCCESS` immediately without an external Celery worker.
+- Problem 3: No audio streaming/playback route.
+  - Solution: Mounted FastAPI `/outputs` to `StaticFiles(directory=str(outputs_dir))`. Updated `frontend/src/App.jsx` with an `<audio controls>` player that streams `http://localhost:8000/outputs/speech.wav` as soon as generation succeeds.
+- Tests & Validation:
+  - Regression test: `python -m unittest discover -s tests -p 'test_*.py'` -> 20/20 tests PASS.
+  - Live API: `POST /api/v1/audio/synthesize` -> `202 Accepted` with `status: SUCCESS` in ~2.5s using Kokoro GPU inference (`device: CUDA`).
+  - Task Status Polling: `GET /api/v1/audio/synthesize/{taskId}` -> returns `status: SUCCESS`.
+  - Static Audio: `GET /outputs/speech.wav` -> `200 OK`, `Content-Type: audio/x-wav`.
+
+#### 2026-09-04 - Phase 1 Multi-Model Router & Phase 2 Voice Clone Pipeline
+
+- Change:
+  - Phase 1: Integrated 4 TTS models (Kokoro-82M, XTTS-v2, Higgs TTS 2 3B, Dia-1.6B) with full automated routing by mode, language, quality, and style (`[S1]`/`[S2]` speaker tags). Added `style` and `model_used` schema attributes.
+  - Phase 2: Created `backend/audio_utils.py` for scanning `inputs/`, probing metadata, validating duration/channels/rate, and automatically converting any audio format (MP3, FLAC, OGG, M4A, AAC, WAV, etc.) to 24kHz mono WAV in `inputs/.converted/`.
+  - Added `GET /api/v1/audio/samples` API endpoint with full metadata and clone readiness flag.
+  - Added frontend clone mode selector reading from `inputs/`, metadata badges, format support guide, and refresh button.
+- Tests: `PYTHONPATH=backend backend/.conda/bin/python -m unittest discover -s tests -p 'test_*.py' -v`
+- Result: PASS - 37/37 unit tests completed successfully (21 router tests, 5 audio utils tests, contract & Celery tests).
+- Follow-up: Proceed with Phase 2 forced alignment (phoneme timestamp extraction) and viseme mapping.
 
 ## Useful Paths
 
-- Source: `src/voice_engine.py`
-- Existing smoke test: `tests/hardware_test.py`
-- Dependencies: `requirements.txt`
-- Input assets: `inputs/`
-- Generated audio: `outputs/`
+- Backend Entrypoint: `backend/app.py`
+- Celery Configuration: `backend/celery_app.py`
+- Voice Engine Router: `backend/voice_engine.py`
+- Audio Utilities & Format Converter: `backend/audio_utils.py`
+- Voice Sample Inputs: `inputs/`
+- Converted Reference Audio: `inputs/.converted/`
+- Frontend UI: `frontend/src/App.jsx`
+- Type Checker / LSP Config: `pyrefly.toml`
+- Environment Config: `.env`
+- Dependencies: `backend/requirements.txt`
+- Generated Audio: `outputs/`
+

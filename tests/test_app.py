@@ -116,17 +116,24 @@ class RenderJobApiTests(unittest.TestCase):
             response = self.client.post("/api/v1/audio/synthesize", json=request)
 
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json(), {"taskId": "TASK-123", "status": "QUEUED"})
+        body = response.json()
+        self.assertEqual(body["taskId"], "TASK-123")
+        self.assertEqual(body["status"], "QUEUED")
+        # modelUsed is None when task is still in QUEUED state
+        self.assertIsNone(body.get("modelUsed"))
         delay.assert_called_once()
 
     def test_synthesis_status_reads_celery_state(self):
-        pending_task = type("Task", (), {"state": "PENDING"})()
+        pending_task = type("Task", (), {"state": "PENDING", "result": None})()
 
         with patch("app.celery.AsyncResult", return_value=pending_task):
             response = self.client.get("/api/v1/audio/synthesize/TASK-123")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"taskId": "TASK-123", "status": "QUEUED"})
+        body = response.json()
+        self.assertEqual(body["taskId"], "TASK-123")
+        self.assertEqual(body["status"], "QUEUED")
+        self.assertIsNone(body.get("modelUsed"))
 
     def test_celery_queue_persists_job_for_status_lookup(self):
         queue = CeleryJobQueue(redis_client=FakeRedis())
