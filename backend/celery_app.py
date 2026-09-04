@@ -58,6 +58,9 @@ def synthesize_audio(payload: dict) -> dict:
         language=request.language,
         quality=request.quality,
         style=request.style,
+        speed=request.speed,
+        pitch=request.pitch,
+        return_alignment=request.return_alignment,
         speaker_wav=request.speaker_wav,
         output_filename=request.output_filename,
     )

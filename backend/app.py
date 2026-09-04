@@ -11,14 +11,23 @@ else:
     load_dotenv()
 
 from celery_app import celery, synthesize_audio
-from contracts import AudioSynthesisRequest, AvatarRenderJob, RenderJobResponse, SynthesisJobResponse
+from contracts import (
+    AudioSynthesisRequest,
+    AvatarRenderJob,
+    RenderJobResponse,
+    SynthesisJobResponse,
+    AlignmentRequest,
+    AlignmentResponse,
+)
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from audio_utils import list_voice_samples, SUPPORTED_EXTENSIONS
+from alignment_engine import ForcedAligner
 from job_queue import CeleryJobQueue, InMemoryJobQueue
+
 
 
 app = FastAPI(
@@ -133,6 +142,47 @@ def get_render_job(job_id: str) -> RenderJobResponse:
 
 
 @app.post(
+    "/api/v1/audio/align",
+    response_model=AlignmentResponse,
+    status_code=status.HTTP_200_OK,
+)
+def align_audio(request: AlignmentRequest) -> AlignmentResponse:
+    """Standalone forced alignment extracting millisecond phoneme/viseme timestamps."""
+    try:
+        # Check if audio_path is relative to outputs/ or inputs/
+        audio_path = Path(request.audio_path)
+        if not audio_path.is_absolute():
+            candidate = project_root / request.audio_path
+            if candidate.exists():
+                audio_path = candidate
+            elif (outputs_dir / request.audio_path).exists():
+                audio_path = outputs_dir / request.audio_path
+            elif (inputs_dir / request.audio_path).exists():
+                audio_path = inputs_dir / request.audio_path
+
+        aligner = ForcedAligner()
+        timestamps = aligner.align(
+            audio_path_or_tensor=str(audio_path),
+            transcript=request.transcript,
+            sample_rate=request.sample_rate,
+            language=request.language,
+        )
+        duration_s = timestamps[-1].end_ms / 1000.0 if timestamps else 0.0
+        return AlignmentResponse(
+            phonemeTimestamps=timestamps,
+            durationSeconds=duration_s,
+            phonemeCount=len(timestamps),
+        )
+    except FileNotFoundError as err:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(err)) from err
+    except Exception as err:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Alignment failed: {str(err)}",
+        ) from err
+
+
+@app.post(
     "/api/v1/audio/synthesize",
     response_model=SynthesisJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
@@ -145,9 +195,22 @@ def create_synthesis_job(request: AudioSynthesisRequest) -> SynthesisJobResponse
             task_status = "QUEUED"
         # For eager (in-memory) mode, task result is available immediately
         model_used = None
+        output_path = None
+        duration_seconds = None
+        phoneme_timestamps = None
         if task_status == "SUCCESS" and hasattr(task, "result") and isinstance(task.result, dict):
             model_used = task.result.get("model")
-        return SynthesisJobResponse(taskId=task.id, status=task_status, modelUsed=model_used)
+            output_path = task.result.get("output_path")
+            duration_seconds = task.result.get("duration_seconds")
+            phoneme_timestamps = task.result.get("phoneme_timestamps")
+        return SynthesisJobResponse(
+            taskId=task.id,
+            status=task_status,
+            modelUsed=model_used,
+            outputPath=output_path,
+            durationSeconds=duration_seconds,
+            phonemeTimestamps=phoneme_timestamps,
+        )
     except Exception as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -169,8 +232,21 @@ def get_synthesis_job(task_id: str) -> SynthesisJobResponse:
         }
         task_status = state_mapping.get(task.state, task.state)
         model_used = None
+        output_path = None
+        duration_seconds = None
+        phoneme_timestamps = None
         if task.state == "SUCCESS" and isinstance(task.result, dict):
             model_used = task.result.get("model")
-        return SynthesisJobResponse(taskId=task_id, status=task_status, modelUsed=model_used)
+            output_path = task.result.get("output_path")
+            duration_seconds = task.result.get("duration_seconds")
+            phoneme_timestamps = task.result.get("phoneme_timestamps")
+        return SynthesisJobResponse(
+            taskId=task_id,
+            status=task_status,
+            modelUsed=model_used,
+            outputPath=output_path,
+            durationSeconds=duration_seconds,
+            phonemeTimestamps=phoneme_timestamps,
+        )
     except Exception as error:
         return SynthesisJobResponse(taskId=task_id, status="UNKNOWN")

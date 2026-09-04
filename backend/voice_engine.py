@@ -13,16 +13,18 @@ Routing matrix:
 
 import os
 import time
+import math
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import torch
 import soundfile as sf
 import numpy as np
 
 from audio_utils import validate_and_convert_for_cloning, AudioValidationError
+from alignment_engine import ForcedAligner
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,8 @@ class SynthesisResult:
     latency_ms: float
     model: str
     mode: str
+    phoneme_timestamps: Optional[list] = None
+
 
 
 class VoiceEngineRouter:
@@ -380,19 +384,25 @@ class VoiceEngineRouter:
         language: str = "en",
         quality: str = "balanced",
         style: Optional[str] = None,
+        speed: Optional[float] = None,
+        pitch: Optional[float] = None,
+        return_alignment: bool = False,
     ) -> SynthesisResult:
         """
         Synthesize speech using the automatically selected model.
 
         Parameters
         ----------
-        text            : Text to synthesize. Use [S1]/[S2] tags for Dia dialogue.
-        mode            : 'fast' | 'clone' | 'high_quality' | 'dialogue'
-        speaker_wav     : Path to reference WAV (required for 'clone', optional for 'high_quality')
-        output_filename : Output filename under outputs/
-        language        : BCP-47 language code (e.g. 'en', 'es', 'fr', 'ja')
-        quality         : 'fast' | 'balanced' | 'high'
-        style           : Optional style hint ('dialogue', 'expressive', 'narration')
+        text             : Text to synthesize. Use [S1]/[S2] tags for Dia dialogue.
+        mode             : 'fast' | 'clone' | 'high_quality' | 'dialogue'
+        speaker_wav      : Path to reference WAV (required for 'clone', optional for 'high_quality')
+        output_filename  : Output filename under outputs/
+        language         : BCP-47 language code (e.g. 'en', 'es', 'fr', 'ja')
+        quality          : 'fast' | 'balanced' | 'high'
+        style            : Optional style hint ('dialogue', 'expressive', 'narration')
+        speed            : Speed/rhythm multiplier (0.5x to 2.0x)
+        pitch            : Pitch shift multiplier (0.5x to 2.0x)
+        return_alignment : Generate millisecond phoneme/viseme timestamps
         """
         if not text.strip():
             raise ValueError("text must not be empty")
@@ -411,7 +421,7 @@ class VoiceEngineRouter:
         print(
             f"\n{'='*60}\n"
             f"[VoiceEngine] mode={mode!r} lang={language!r} quality={quality!r} "
-            f"style={style!r} → model={model_key!r}\n"
+            f"style={style!r} speed={speed} pitch={pitch} align={return_alignment} → model={model_key!r}\n"
             f"{'='*60}"
         )
 
@@ -432,6 +442,39 @@ class VoiceEngineRouter:
         else:
             raise ValueError(f"Internal error: unknown model key '{model_key}'")
 
+        # Apply prosody adjustments (speed / pitch) if specified
+        if (speed is not None and abs(speed - 1.0) > 0.01) or (pitch is not None and abs(pitch - 1.0) > 0.01):
+            try:
+                import librosa
+                y, sr = librosa.load(str(output_path), sr=sample_rate)
+                if speed is not None and abs(speed - 1.0) > 0.01:
+                    y = librosa.effects.time_stretch(y, rate=speed)
+                if pitch is not None and abs(pitch - 1.0) > 0.01:
+                    n_steps = 12 * math.log2(pitch)
+                    y = librosa.effects.pitch_shift(y, sr=sr, n_steps=n_steps)
+                sf.write(str(output_path), y, sr)
+                duration = len(y) / sr
+                sample_rate = sr
+                print(f"[Prosody] Applied speed={speed} pitch={pitch} -> new duration={duration:.2f}s")
+            except Exception as prosody_err:
+                logger.warning("Prosody post-processing failed: %s", prosody_err)
+
+        # Generate millisecond phoneme/viseme timestamps if requested
+        phoneme_timestamps = None
+        if return_alignment:
+            try:
+                aligner = ForcedAligner(device=self.device)
+                timestamps = aligner.align(
+                    audio_path_or_tensor=str(output_path),
+                    transcript=text,
+                    sample_rate=sample_rate,
+                    language=language,
+                )
+                phoneme_timestamps = [t.model_dump(by_alias=True) for t in timestamps]
+                print(f"[Aligner] Extracted {len(phoneme_timestamps)} phoneme/viseme timestamps.")
+            except Exception as align_err:
+                logger.warning("Forced alignment failed: %s", align_err)
+
         latency = (time.time() - start_time) * 1000
         print(f"\n✅ Audio saved → {os.path.abspath(output_path)}")
         print(f"⏱  Latency: {latency:.0f} ms  |  Duration: {duration:.2f}s  |  Model: {model_key}")
@@ -444,7 +487,9 @@ class VoiceEngineRouter:
             latency_ms=latency,
             model=model_key,
             mode=mode,
+            phoneme_timestamps=phoneme_timestamps,
         )
+
 
 
 # ------------------------------------------------------------------

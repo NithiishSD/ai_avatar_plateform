@@ -233,8 +233,12 @@ The broader PDF also asks for 5+ TTS models, MMS-TTS/OpenVoice support, lip sync
 - [x] Auto audio format converter (`librosa` + `soundfile`) converting MP3/FLAC/OGG/M4A/etc. to 24kHz mono WAV.
 - [x] Voice sample selector directly from `inputs/` folder with real-time UI probe.
 - [x] Confirm XTTS-v2 as the zero-shot cloning backend integrated with validation pipeline.
-- [ ] Implement forced alignment and millisecond phoneme timestamps.
-- [ ] Map phonemes to the shared viseme vocabulary.
+- [x] Implement forced alignment and millisecond phoneme timestamps (`backend/alignment_engine.py` with MMS_FA & acoustic aligner).
+- [x] Map phonemes to the shared 15 canonical viseme vocabulary (`PhonemeToVisemeMapper`).
+- [x] Prosody controls: speed/rhythm (0.5x–2.0x) and pitch shift (0.5x–2.0x).
+- [x] Standalone alignment API `POST /api/v1/audio/align` and synthesis returnAlignment flag.
+- [x] UI live viseme synchronization and one-click `AvatarRenderJob` creation with real phoneme timestamps.
+
 
 ### Phases 3-6
 
@@ -463,20 +467,28 @@ Evidence / artifact:
   - Task Status Polling: `GET /api/v1/audio/synthesize/{taskId}` -> returns `status: SUCCESS`.
   - Static Audio: `GET /outputs/speech.wav` -> `200 OK`, `Content-Type: audio/x-wav`.
 
-#### 2026-09-04 - Phase 1 Multi-Model Router & Phase 2 Voice Clone Pipeline
+#### 2026-09-04 - Phase 2 Forced Alignment & Prosody Engine Completion
 
 - Change:
-  - Phase 1: Integrated 4 TTS models (Kokoro-82M, XTTS-v2, Higgs TTS 2 3B, Dia-1.6B) with full automated routing by mode, language, quality, and style (`[S1]`/`[S2]` speaker tags). Added `style` and `model_used` schema attributes.
-  - Phase 2: Created `backend/audio_utils.py` for scanning `inputs/`, probing metadata, validating duration/channels/rate, and automatically converting any audio format (MP3, FLAC, OGG, M4A, AAC, WAV, etc.) to 24kHz mono WAV in `inputs/.converted/`.
-  - Added `GET /api/v1/audio/samples` API endpoint with full metadata and clone readiness flag.
-  - Added frontend clone mode selector reading from `inputs/`, metadata badges, format support guide, and refresh button.
-- Tests: `PYTHONPATH=backend backend/.conda/bin/python -m unittest discover -s tests -p 'test_*.py' -v`
-- Result: PASS - 37/37 unit tests completed successfully (21 router tests, 5 audio utils tests, contract & Celery tests).
-- Follow-up: Proceed with Phase 2 forced alignment (phoneme timestamp extraction) and viseme mapping.
+  - Created `backend/alignment_engine.py`:
+    - `ForcedAligner`: Integrates `torchaudio.pipelines.MMS_FA` (multilingual forced aligner for 1000+ languages) with robust syllabic/acoustic energy fallback. Extracts millisecond start/end timestamps.
+    - `PhonemeToVisemeMapper`: Maps CMUDict/ARPAbet/IPA phonemes to 15 canonical facial visemes (`viseme_aa`, `viseme_E`, `viseme_I`, `viseme_O`, `viseme_U`, `viseme_PP`, `viseme_FF`, `viseme_TH`, `viseme_DD`, `viseme_kk`, `viseme_CH`, `viseme_SS`, `viseme_nn`, `viseme_RR`, `viseme_sil`).
+  - Extended `backend/voice_engine.py` & `backend/celery_app.py`:
+    - Prosody adjustments: speed/rhythm time-stretch (0.5x–2.0x) and pitch shift (0.5x–2.0x).
+    - `return_alignment=True` parameter automatically extracts phoneme/viseme timestamps post-synthesis.
+  - Added `POST /api/v1/audio/align` endpoint in `backend/app.py`.
+  - Upgraded frontend `frontend/src/App.jsx`:
+    - Speed and Pitch interactive slider controls.
+    - Live Viseme mouth shape indicator synced to audio playback `timeupdate` events.
+    - Aligned phonemes timeline with collapsible view.
+    - "Create Render Job" button constructing real `AvatarRenderJob` payloads containing synthesized audio URL and generated phoneme timestamps.
+- Tests: `PYTHONPATH=backend backend/.conda/bin/python -m unittest discover -s tests -p 'test_*.py'`
+- Result: PASS - 46/46 unit tests completed successfully across all test suites (contracts, voice engine routing, audio utils, Celery tasks, and alignment engine).
 
 ## Useful Paths
 
 - Backend Entrypoint: `backend/app.py`
+- Forced Alignment Engine: `backend/alignment_engine.py`
 - Celery Configuration: `backend/celery_app.py`
 - Voice Engine Router: `backend/voice_engine.py`
 - Audio Utilities & Format Converter: `backend/audio_utils.py`
@@ -487,4 +499,6 @@ Evidence / artifact:
 - Environment Config: `.env`
 - Dependencies: `backend/requirements.txt`
 - Generated Audio: `outputs/`
+- Alignment Unit Tests: `tests/test_alignment_engine.py`
+
 

@@ -72,7 +72,10 @@ function App() {
   const [language, setLanguage]   = useState("en");
   const [quality, setQuality]     = useState("balanced");
   const [style, setStyle]         = useState("");
-  const [selectedSample, setSelectedSample] = useState("");
+  const [speed, setSpeed]         = useState(1.0);
+  const [pitch, setPitch]         = useState(1.0);
+  const [returnAlignment, setReturnAlignment] = useState(true);
+  const [selectedSample, setSelectedSample]   = useState("");
 
   const [backendStatus, setBackendStatus] = useState("Checking...");
   const [taskId, setTaskId]       = useState("");
@@ -83,6 +86,9 @@ function App() {
   const [error, setError]         = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [audioUrl, setAudioUrl]   = useState("");
+  const [phonemeTimestamps, setPhonemeTimestamps] = useState([]);
+  const [activeViseme, setActiveViseme] = useState("viseme_sil");
+  const [showTimeline, setShowTimeline] = useState(false);
 
   // Voice samples from inputs/ folder (for clone mode)
   const [voiceSamples, setVoiceSamples]       = useState([]);
@@ -143,6 +149,24 @@ function App() {
     if (mode === "clone") fetchSamples();
   }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /* ---------- audio playback time synchronization ------------------- */
+  const handleAudioTimeUpdate = (e) => {
+    const currentMs = e.target.currentTime * 1000;
+    if (!phonemeTimestamps || phonemeTimestamps.length === 0) return;
+    const current = phonemeTimestamps.find(
+      (t) => currentMs >= t.startMs && currentMs < t.endMs
+    );
+    if (current) {
+      setActiveViseme(current.viseme);
+    } else {
+      setActiveViseme("viseme_sil");
+    }
+  };
+
+  const handleAudioEnded = () => {
+    setActiveViseme("viseme_sil");
+  };
+
   /* ---------- task status polling ----------------------------------- */
   useEffect(() => {
     if (!taskId) return;
@@ -156,6 +180,7 @@ function App() {
         const payload = await res.json();
         setTaskStatus(payload.status);
         if (payload.modelUsed) setModelUsed(payload.modelUsed);
+        if (payload.phonemeTimestamps) setPhonemeTimestamps(payload.phonemeTimestamps);
         if (payload.status === "SUCCESS") {
           setAudioUrl(`${API_BASE}/outputs/speech.wav?t=${Date.now()}`);
         }
@@ -173,10 +198,19 @@ function App() {
     setError("");
     setAudioUrl("");
     setModelUsed(null);
+    setPhonemeTimestamps([]);
     setIsSubmitting(true);
 
     try {
-      const body = { text, mode, language, quality };
+      const body = {
+        text,
+        mode,
+        language,
+        quality,
+        speed: parseFloat(speed),
+        pitch: parseFloat(pitch),
+        returnAlignment,
+      };
       if (style) body.style = style;
       // For clone mode, pass the selected input file path
       if (mode === "clone") {
@@ -202,6 +236,7 @@ function App() {
       const newStatus = payload.status || "QUEUED";
       setTaskStatus(newStatus);
       if (payload.modelUsed) setModelUsed(payload.modelUsed);
+      if (payload.phonemeTimestamps) setPhonemeTimestamps(payload.phonemeTimestamps);
       if (newStatus === "SUCCESS") {
         setAudioUrl(`${API_BASE}/outputs/speech.wav?t=${Date.now()}`);
       }
@@ -212,14 +247,35 @@ function App() {
     }
   };
 
-  /* ---------- render job -------------------------------------------- */
+  /* ---------- render job with aligned audio ------------------------- */
   const handleCreateRenderJob = async () => {
     setError("");
     try {
+      // Use synthesized audio and aligned timestamps if available, otherwise sample
+      const timestamps = phonemeTimestamps.length > 0
+        ? phonemeTimestamps
+        : buildSampleRenderJob().phonemeTimestamps;
+
+      const duration = timestamps.length > 0
+        ? timestamps[timestamps.length - 1].endMs / 1000.0
+        : 2.5;
+
+      const jobPayload = {
+        jobId: `JOB-${Date.now()}`,
+        avatarId: "AVATAR_FEMALE_01",
+        audioUrl: `${API_BASE}/outputs/speech.wav`,
+        sampleRate: 24000,
+        durationSeconds: Math.max(duration, 0.5),
+        phonemeTimestamps: timestamps,
+        emotionVector: { happy: 0.8, neutral: 0.2, eyeblinkRate: 1.2 },
+        renderQuality: "1080P_HQ",
+        targetFps: 30,
+      };
+
       const res = await fetch(`${API_BASE}/api/v1/avatar/render-job`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildSampleRenderJob()),
+        body: JSON.stringify(jobPayload),
       });
       const payload = await res.json();
       if (!res.ok) throw new Error(payload.detail || "Render job creation failed");
@@ -236,7 +292,7 @@ function App() {
       <header className="header">
         <div>
           <h1>AI Avatar Creator Studio</h1>
-          <p>Live frontend connected to the Python backend</p>
+          <p>Phase 2 Voice Engine & Forced Alignment Pipeline</p>
         </div>
         <div className="status">
           <span className="status-dot" />
@@ -248,8 +304,8 @@ function App() {
         {/* -------- LEFT: Controls -------- */}
         <section className="canvas-panel">
           <div className="panel-header">
-            <h2>Voice Synthesis Controls</h2>
-            <span>Backend sync enabled</span>
+            <h2>Voice Synthesis & Prosody Controls</h2>
+            <span>Phase 2 Neural Stack</span>
           </div>
 
           <form className="studio-form" onSubmit={handleSynthesize}>
@@ -258,7 +314,7 @@ function App() {
               <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                rows={4}
+                rows={3}
                 placeholder="Enter text • Use [S1] / [S2] tags for dialogue mode"
               />
             </label>
@@ -392,6 +448,48 @@ function App() {
               </label>
             </div>
 
+            {/* Prosody controls: Speed & Pitch */}
+            <div className="grid-two" style={{ marginTop: "4px" }}>
+              <label>
+                Speed / Rhythm: <span style={{ color: "#38bdf8", fontWeight: "bold" }}>{speed}x</span>
+                <input
+                  type="range"
+                  min="0.6"
+                  max="1.6"
+                  step="0.05"
+                  value={speed}
+                  onChange={(e) => setSpeed(e.target.value)}
+                  style={{ width: "100%", accentColor: "#38bdf8" }}
+                />
+              </label>
+
+              <label>
+                Pitch Shift: <span style={{ color: "#38bdf8", fontWeight: "bold" }}>{pitch}x</span>
+                <input
+                  type="range"
+                  min="0.7"
+                  max="1.4"
+                  step="0.05"
+                  value={pitch}
+                  onChange={(e) => setPitch(e.target.value)}
+                  style={{ width: "100%", accentColor: "#38bdf8" }}
+                />
+              </label>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", margin: "6px 0" }}>
+              <input
+                type="checkbox"
+                id="alignment-checkbox"
+                checked={returnAlignment}
+                onChange={(e) => setReturnAlignment(e.target.checked)}
+                style={{ width: "auto", cursor: "pointer" }}
+              />
+              <label htmlFor="alignment-checkbox" style={{ fontSize: "0.82rem", color: "#e2e8f0", cursor: "pointer", margin: 0 }}>
+                ⚡ Extract Millisecond Phoneme & Viseme Timestamps
+              </label>
+            </div>
+
             <label>
               Style <span style={{ fontSize: "0.75rem", color: "#6b7280" }}>(optional)</span>
               <select id="style-select" value={style} onChange={(e) => setStyle(e.target.value)}>
@@ -417,9 +515,15 @@ function App() {
 
             <div className="controls">
               <button type="submit" id="generate-btn" disabled={isSubmitting}>
-                {isSubmitting ? "Submitting..." : "Generate Speech"}
+                {isSubmitting ? "Synthesizing..." : "Generate Speech"}
               </button>
-              <button type="button" id="render-job-btn" className="secondary" onClick={handleCreateRenderJob}>
+              <button
+                type="button"
+                id="render-job-btn"
+                className="secondary"
+                onClick={handleCreateRenderJob}
+                title="Create avatar video rendering job using synthesized audio and phoneme timestamps"
+              >
                 Create Render Job
               </button>
             </div>
@@ -428,9 +532,9 @@ function App() {
           {error ? <div className="alert error">{error}</div> : null}
         </section>
 
-        {/* -------- RIGHT: Status panel -------- */}
+        {/* -------- RIGHT: Status & Viseme Visualizer panel -------- */}
         <section className="info-panel">
-          <h2>Synthesis Status</h2>
+          <h2>Synthesis & Lip-Sync Status</h2>
 
           <div className="info-card">
             <label>Task ID</label>
@@ -450,6 +554,89 @@ function App() {
             }
           </div>
 
+          {/* Viseme / Facial Shape Indicator */}
+          <div className="info-card" style={{
+            background: "linear-gradient(135deg, #1e293b, #0f172a)",
+            border: "1px solid #3b82f6",
+          }}>
+            <label style={{ color: "#60a5fa" }}>👄 Live Viseme Sync</label>
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginTop: "6px",
+            }}>
+              <span style={{
+                fontSize: "1.1rem",
+                fontWeight: "bold",
+                color: activeViseme === "viseme_sil" ? "#64748b" : "#38bdf8",
+              }}>
+                {activeViseme}
+              </span>
+              <span style={{
+                padding: "2px 8px",
+                borderRadius: "4px",
+                fontSize: "0.72rem",
+                background: activeViseme === "viseme_sil" ? "#334155" : "#1d4ed8",
+                color: "#f8fafc",
+              }}>
+                {activeViseme === "viseme_sil" ? "Rest / Silence" : "Active Speaking"}
+              </span>
+            </div>
+          </div>
+
+          {/* Phoneme timestamps timeline */}
+          {phonemeTimestamps && phonemeTimestamps.length > 0 && (
+            <div className="info-card">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <label>Aligned Phonemes ({phonemeTimestamps.length})</label>
+                <button
+                  type="button"
+                  onClick={() => setShowTimeline(!showTimeline)}
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    color: "#38bdf8",
+                    fontSize: "0.75rem",
+                    cursor: "pointer",
+                    textDecoration: "underline",
+                  }}
+                >
+                  {showTimeline ? "Hide Details" : "Show Details"}
+                </button>
+              </div>
+
+              {showTimeline && (
+                <div style={{
+                  maxHeight: "130px",
+                  overflowY: "auto",
+                  marginTop: "8px",
+                  fontSize: "0.72rem",
+                  background: "#0f172a",
+                  padding: "6px",
+                  borderRadius: "6px",
+                  border: "1px solid #334155",
+                }}>
+                  {phonemeTimestamps.map((t, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        padding: "2px 4px",
+                        borderBottom: "1px solid #1e293b",
+                        color: activeViseme === t.viseme ? "#38bdf8" : "#94a3b8",
+                      }}
+                    >
+                      <span><strong>{t.phoneme}</strong> → {t.viseme}</span>
+                      <span>{t.startMs}ms - {t.endMs}ms</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="info-card">
             <label>Render Job ID</label>
             <strong>{jobId || "Not created"}</strong>
@@ -461,19 +648,26 @@ function App() {
           </div>
 
           <div className="info-card">
-            <label>Output</label>
+            <label>Output Audio</label>
             <strong>
               {taskStatus === "SUCCESS"
-                ? "Audio generated successfully"
+                ? "Audio & Lip-Sync Ready"
                 : taskStatus === "FAILED"
                 ? "Generation failed"
                 : taskStatus === "QUEUED" || taskStatus === "PROCESSING"
-                ? "Generating speech…"
+                ? "Generating speech & alignment…"
                 : "Waiting for generation"}
             </strong>
             {audioUrl ? (
               <div style={{ marginTop: "0.75rem" }}>
-                <audio controls src={audioUrl} style={{ width: "100%" }}>
+                <audio
+                  controls
+                  src={audioUrl}
+                  style={{ width: "100%" }}
+                  onTimeUpdate={handleAudioTimeUpdate}
+                  onEnded={handleAudioEnded}
+                  onPause={handleAudioEnded}
+                >
                   Your browser does not support audio playback.
                 </audio>
                 <div style={{ marginTop: "0.35rem", fontSize: "0.8rem", color: "#9ca3af" }}>
@@ -489,3 +683,4 @@ function App() {
 }
 
 export default App;
+

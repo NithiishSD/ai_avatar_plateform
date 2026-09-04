@@ -97,6 +97,23 @@ class AudioSynthesisRequest(BaseModel):
         default=None,
         description="Optional style hint: 'dialogue', 'expressive', 'narration'",
     )
+    speed: Optional[float] = Field(
+        default=None,
+        ge=0.5,
+        le=2.0,
+        description="Playback rhythm/speed multiplier (0.5x to 2.0x)",
+    )
+    pitch: Optional[float] = Field(
+        default=None,
+        ge=0.5,
+        le=2.0,
+        description="Pitch shift multiplier (0.5x to 2.0x)",
+    )
+    return_alignment: bool = Field(
+        default=False,
+        alias="returnAlignment",
+        description="Whether to generate millisecond phoneme/viseme timestamps",
+    )
     speaker_wav: Optional[str] = Field(default=None, alias="speakerWav")
     output_filename: str = Field(default="speech.wav", alias="outputFilename", min_length=1)
 
@@ -117,6 +134,7 @@ class AudioSynthesisResponse(BaseModel):
     latency_ms: float = Field(alias="latencyMs")
     model: str
     mode: SynthesisMode
+    phoneme_timestamps: Optional[List[PhonemeTimestamp]] = Field(default=None, alias="phonemeTimestamps")
 
 
 class SynthesisJobResponse(BaseModel):
@@ -125,3 +143,23 @@ class SynthesisJobResponse(BaseModel):
     task_id: str = Field(alias="taskId")
     status: str
     model_used: Optional[str] = Field(default=None, alias="modelUsed")
+    output_path: Optional[str] = Field(default=None, alias="outputPath")
+    duration_seconds: Optional[float] = Field(default=None, alias="durationSeconds")
+    phoneme_timestamps: Optional[List[PhonemeTimestamp]] = Field(default=None, alias="phonemeTimestamps")
+
+
+class AlignmentRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    audio_path: str = Field(alias="audioPath", min_length=1)
+    transcript: str = Field(min_length=1)
+    language: str = Field(default="en", min_length=2, max_length=16)
+    sample_rate: int = Field(default=24000, alias="sampleRate", ge=8000, le=192000)
+
+
+class AlignmentResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    phoneme_timestamps: List[PhonemeTimestamp] = Field(alias="phonemeTimestamps")
+    duration_seconds: float = Field(alias="durationSeconds")
+    phoneme_count: int = Field(alias="phonemeCount")
