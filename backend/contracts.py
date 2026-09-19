@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -21,6 +21,8 @@ class SynthesisMode(str, Enum):
     CLONE = "clone"
     HIGH_QUALITY = "high_quality"
     DIALOGUE = "dialogue"
+    # Phase 3: force the MMS-TTS path for one of its 1000+ languages.
+    MULTILINGUAL = "multilingual"
 
 
 class PhonemeTimestamp(BaseModel):
@@ -39,11 +41,28 @@ class PhonemeTimestamp(BaseModel):
 
 
 class EmotionVector(BaseModel):
+    """
+    Facial expression weights sent to the renderer.
+
+    ``happy`` / ``neutral`` / ``eyeblinkRate`` are the Phase 0 frozen fields and
+    stay required. Phase 3 adds the roadmap's named emotions as *optional*
+    fields, so a Phase 0 payload validates unchanged while an emotion-aware
+    producer can send the full vector.
+    """
+
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     happy: float = Field(ge=0, le=1)
     neutral: float = Field(ge=0, le=1)
     eyeblink_rate: float = Field(alias="eyeblinkRate", ge=0, le=10)
+
+    # Phase 3 emotion prosody vector (optional, defaults preserve Phase 0).
+    joy: Optional[float] = Field(default=None, ge=0, le=1)
+    anger: Optional[float] = Field(default=None, ge=0, le=1)
+    sorrow: Optional[float] = Field(default=None, ge=0, le=1)
+    authority: Optional[float] = Field(default=None, ge=0, le=1)
+    calm: Optional[float] = Field(default=None, ge=0, le=1)
+    excitement: Optional[float] = Field(default=None, ge=0, le=1)
 
 
 class AvatarRenderJob(BaseModel):
@@ -114,6 +133,27 @@ class AudioSynthesisRequest(BaseModel):
         alias="returnAlignment",
         description="Whether to generate millisecond phoneme/viseme timestamps",
     )
+    emotion: Optional[str] = Field(
+        default=None,
+        description="Named emotion preset: neutral, joy, anger, sorrow, authority, calm, excitement",
+    )
+    emotion_intensity: float = Field(
+        default=1.0,
+        alias="emotionIntensity",
+        ge=0.0,
+        le=1.0,
+        description="Strength of the named emotion; the remainder stays neutral",
+    )
+    emotion_vector: Optional[Dict[str, float]] = Field(
+        default=None,
+        alias="emotionVector",
+        description="Blend of named emotions, e.g. {'joy': 0.6, 'authority': 0.4}. Overrides 'emotion'.",
+    )
+    audit_quality: bool = Field(
+        default=False,
+        alias="auditQuality",
+        description="Run the MOS/PESQ speech quality auditor on the generated audio",
+    )
     speaker_wav: Optional[str] = Field(default=None, alias="speakerWav")
     output_filename: str = Field(default="speech.wav", alias="outputFilename", min_length=1)
 
@@ -135,6 +175,9 @@ class AudioSynthesisResponse(BaseModel):
     model: str
     mode: SynthesisMode
     phoneme_timestamps: Optional[List[PhonemeTimestamp]] = Field(default=None, alias="phonemeTimestamps")
+    emotion: Optional[Dict[str, Any]] = Field(default=None)
+    quality_report: Optional[Dict[str, Any]] = Field(default=None, alias="qualityReport")
+    language: Optional[Dict[str, Any]] = Field(default=None)
 
 
 class SynthesisJobResponse(BaseModel):
@@ -146,6 +189,10 @@ class SynthesisJobResponse(BaseModel):
     output_path: Optional[str] = Field(default=None, alias="outputPath")
     duration_seconds: Optional[float] = Field(default=None, alias="durationSeconds")
     phoneme_timestamps: Optional[List[PhonemeTimestamp]] = Field(default=None, alias="phonemeTimestamps")
+    emotion: Optional[Dict[str, Any]] = Field(default=None)
+    quality_report: Optional[Dict[str, Any]] = Field(default=None, alias="qualityReport")
+    language: Optional[Dict[str, Any]] = Field(default=None)
+    latency_ms: Optional[float] = Field(default=None, alias="latencyMs")
 
 
 class AlignmentRequest(BaseModel):
@@ -163,3 +210,82 @@ class AlignmentResponse(BaseModel):
     phoneme_timestamps: List[PhonemeTimestamp] = Field(alias="phonemeTimestamps")
     duration_seconds: float = Field(alias="durationSeconds")
     phoneme_count: int = Field(alias="phonemeCount")
+
+# ---------------------------------------------------------------------------
+# Phase 3 - multilingual synthesis, emotion prosody, quality auditing
+# ---------------------------------------------------------------------------
+
+
+class LanguageEntry(BaseModel):
+    """One entry of the MMS-TTS language catalogue."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    requested: str
+    iso3: str
+    name: str
+    mms_supported: bool = Field(alias="mmsSupported")
+    mms_model: Optional[str] = Field(default=None, alias="mmsModel")
+    xtts_supported: bool = Field(alias="xttsSupported")
+    is_english: bool = Field(alias="isEnglish")
+
+
+class LanguagesResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    total: int
+    returned: int
+    query: str = ""
+    source: str
+    languages: List[LanguageEntry]
+
+
+class EmotionPresetEntry(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str
+    label: str
+    description: str
+    prosody: Dict[str, float]
+    render_hint: Dict[str, float] = Field(alias="renderHint")
+
+
+class EmotionPresetsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    presets: List[EmotionPresetEntry]
+    default: str = "neutral"
+
+
+class QualityAuditRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    audio_path: str = Field(alias="audioPath", min_length=1)
+    reference_path: Optional[str] = Field(
+        default=None,
+        alias="referencePath",
+        description=(
+            "Any clean, non-matching speech clip. SQUIM's subjective MOS head "
+            "needs one; without it the MOS is self-referenced and biased upward."
+        ),
+    )
+
+
+class QualityAuditResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    audio_path: str = Field(alias="audioPath")
+    report: Dict[str, Any]
+
+
+class VoiceSimilarityRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    reference_path: str = Field(alias="referencePath", min_length=1)
+    generated_path: str = Field(alias="generatedPath", min_length=1)
+
+
+class VoiceSimilarityResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    report: Dict[str, Any]

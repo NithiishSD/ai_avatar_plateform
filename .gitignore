@@ -49,3 +49,13 @@ venv/
 .venv/
 .conda/
 backend/.conda/*
+
+# Generated audio is regenerable; the smoke cloning reference and its
+# provenance record are rebuilt by scripts/make_reference.py --smoke.
+inputs/smoke_reference_*
+
+# Requirements PDFs are the acceptance authority for this project and must be
+# recoverable from history. The *.pdf rule above meant neither was ever
+# committed, so when the problem-statement PDF was corrupted by a text-mode
+# transfer there was no intact copy to restore. Track them explicitly.
+!docs/*.pdf

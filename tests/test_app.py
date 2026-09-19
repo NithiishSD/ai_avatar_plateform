@@ -51,7 +51,12 @@ class RenderJobApiTests(unittest.TestCase):
         response = self.client.get("/health")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok", "queueBackend": "in_memory"})
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["queueBackend"], "in_memory")
+        # Phase 3 added a capability block; the original two keys must remain.
+        self.assertIn("mms-tts", payload["capabilities"]["models"])
+        self.assertGreater(payload["capabilities"]["languages"], 1000)
 
     def test_cors_headers_allow_vite_dev_server(self):
         response = self.client.get("/health", headers={"Origin": "http://localhost:5173"})

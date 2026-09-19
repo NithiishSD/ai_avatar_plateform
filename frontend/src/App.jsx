@@ -7,22 +7,25 @@ const API_BASE = "http://localhost:8000";
 /* Model routing hints shown in the UI                                 */
 /* ------------------------------------------------------------------ */
 const MODE_INFO = {
-  fast:         { label: "⚡ Fast (Kokoro 82M)",        hint: "Sub-second English synthesis. Best for real-time use." },
-  clone:        { label: "🎤 Voice Clone (XTTS-v2)",    hint: "Zero-shot cloning from a reference recording. Multilingual." },
-  high_quality: { label: "🏆 High Quality (Higgs 3B)",  hint: "Ultra-high MOS, multilingual. Slower, GPU-intensive." },
-  dialogue:     { label: "💬 Dialogue (Dia 1.6B)",       hint: "Multi-speaker with [S1] / [S2] tags. Great for conversations." },
+  fast:         { label: "⚡ Fast (Kokoro 82M)",         hint: "Sub-second English synthesis. Best for real-time use." },
+  clone:        { label: "🎤 Voice Clone (XTTS-v2)",     hint: "Zero-shot cloning from a reference recording. Multilingual." },
+  high_quality: { label: "🏆 High Quality (Higgs 3B)",   hint: "Ultra-high MOS, multilingual. Slower, GPU-intensive." },
+  dialogue:     { label: "💬 Dialogue (Dia 1.6B)",        hint: "Multi-speaker with [S1] / [S2] tags. Great for conversations." },
+  multilingual: { label: "🌍 Multilingual (MMS-TTS)",    hint: "Facebook MMS-TTS. Forces the MMS path for 1000+ languages." },
 };
 
-const LANGUAGE_OPTIONS = [
-  { value: "en",    label: "English (en)" },
-  { value: "en-US", label: "English US (en-US)" },
-  { value: "en-GB", label: "English UK (en-GB)" },
-  { value: "es",    label: "Spanish (es) → Higgs" },
-  { value: "fr",    label: "French (fr) → Higgs" },
-  { value: "de",    label: "German (de) → Higgs" },
-  { value: "ja",    label: "Japanese (ja) → Higgs" },
-  { value: "zh",    label: "Chinese (zh) → Higgs" },
-];
+/* Phase 3 emotion presets. Descriptions mirror backend/emotion_engine.py. */
+const EMOTION_INFO = {
+  "":           { label: "— neutral —",      hint: "No prosody transform is applied." },
+  joy:          { label: "😊 Joy",            hint: "Brighter, faster, rising pitch contour." },
+  anger:        { label: "😠 Anger",          hint: "Louder, faster, harsher." },
+  sorrow:       { label: "😢 Sorrow",         hint: "Lower, slower, falling contour." },
+  authority:    { label: "🎓 Authority",      hint: "Deeper and level, but still projecting." },
+  calm:         { label: "😌 Calm",           hint: "Soft and unhurried." },
+  excitement:   { label: "🤩 Excitement",     hint: "Fast, loud, strongly rising." },
+};
+
+const ENGLISH_CODES = ["en", "en-us", "en-gb", "en-au", "en-ca"];
 
 const buildSampleRenderJob = () => ({
   jobId: `JOB-${Date.now()}`,
@@ -42,6 +45,49 @@ const buildSampleRenderJob = () => ({
   targetFps: 30,
 });
 
+
+/*
+ * Mirror of emotion_engine.to_render_emotion_vector for the render-job payload.
+ * happy / neutral / eyeblinkRate are the Phase 0 required fields; the named
+ * emotions ride along in the optional Phase 3 fields.
+ */
+const EMOTION_RENDER_HINTS = {
+  joy:        { happy: 1.0,  blink: 1.6 },
+  anger:      { happy: 0.0,  blink: 2.4 },
+  sorrow:     { happy: 0.0,  blink: 0.6 },
+  authority:  { happy: 0.1,  blink: 0.8 },
+  calm:       { happy: 0.35, blink: 0.9 },
+  excitement: { happy: 0.9,  blink: 2.0 },
+};
+
+function buildRenderEmotionVector(emotionReport) {
+  const vector = emotionReport?.vector;
+  if (!vector) return { happy: 0.8, neutral: 0.2, eyeblinkRate: 1.2 };
+
+  let happy = 0;
+  let blink = 0;
+  let weightSum = 0;
+  const extras = {};
+  for (const [name, weight] of Object.entries(vector)) {
+    if (name === "neutral" || !(weight > 0)) continue;
+    const hint = EMOTION_RENDER_HINTS[name];
+    if (!hint) continue;
+    happy += hint.happy * weight;
+    blink += hint.blink * weight;
+    weightSum += weight;
+    extras[name] = Number(weight.toFixed(4));
+  }
+  blink += 1.0 * Math.max(0, 1 - weightSum);   // neutral blink rate
+  happy = Math.min(1, Math.max(0, happy));
+
+  return {
+    happy: Number(happy.toFixed(4)),
+    neutral: Number((1 - happy).toFixed(4)),
+    eyeblinkRate: Number(Math.min(10, Math.max(0, blink)).toFixed(4)),
+    ...extras,
+  };
+}
+
 function ModelBadge({ modelUsed }) {
   if (!modelUsed) return null;
   const colors = {
@@ -49,6 +95,7 @@ function ModelBadge({ modelUsed }) {
     "xtts-v2":    "#93c5fd",
     "higgs-tts-2":"#fbbf24",
     "dia-1.6b":   "#c4b5fd",
+    "mms-tts":    "#f0abfc",
   };
   return (
     <span style={{
@@ -77,6 +124,18 @@ function App() {
   const [returnAlignment, setReturnAlignment] = useState(true);
   const [selectedSample, setSelectedSample]   = useState("");
 
+  /* Phase 3: emotion prosody, multilingual catalogue, quality auditing */
+  const [emotion, setEmotion]                 = useState("");
+  const [emotionIntensity, setEmotionIntensity] = useState(1.0);
+  const [auditQuality, setAuditQuality]       = useState(false);
+  const [languageQuery, setLanguageQuery]     = useState("");
+  const [languageResults, setLanguageResults] = useState([]);
+  const [languageTotal, setLanguageTotal]     = useState(0);
+  const [languageInfo, setLanguageInfo]       = useState(null);
+  const [qualityReport, setQualityReport]     = useState(null);
+  const [emotionReport, setEmotionReport]     = useState(null);
+  const [latencyMs, setLatencyMs]             = useState(null);
+
   const [backendStatus, setBackendStatus] = useState("Checking...");
   const [taskId, setTaskId]       = useState("");
   const [taskStatus, setTaskStatus] = useState("idle");
@@ -102,9 +161,11 @@ function App() {
     if (mode === "dialogue" || style === "dialogue" || text.includes("[S1]") || text.includes("[S2]")) return "dia-1.6b";
     if (mode === "clone") return "xtts-v2";
     if (mode === "high_quality" || quality === "high") return "higgs-tts-2";
+    if (mode === "multilingual") return languageInfo?.mmsSupported ? "mms-tts" : "unsupported";
     const lang = language.toLowerCase().replace("_", "-");
-    if (!["en", "en-us", "en-gb", "en-au", "en-ca"].includes(lang)) return "higgs-tts-2";
-    return "kokoro";
+    if (ENGLISH_CODES.includes(lang)) return "kokoro";
+    // Mirrors backend routing: MMS-TTS wins for the languages it covers.
+    return languageInfo?.mmsSupported ? "mms-tts" : "higgs-tts-2";
   })();
 
   /* ---------- backend health check ---------------------------------- */
@@ -142,12 +203,59 @@ function App() {
     }
   }, [selectedSample]);
 
+  /* ---------- multilingual catalogue search ------------------------- */
+  const searchLanguages = useCallback(async (query) => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/v1/audio/languages?q=${encodeURIComponent(query)}&limit=40`
+      );
+      if (!res.ok) throw new Error(`Language search failed: ${res.status}`);
+      const data = await res.json();
+      setLanguageResults(data.languages ?? []);
+      setLanguageTotal(data.total ?? 0);
+    } catch (err) {
+      setError(err.message || "Could not search languages");
+    }
+  }, []);
+
+  /* Resolve whichever code is selected, so the UI can say which backend
+     will actually speak it before the user hits Generate. */
+  const describeLanguage = useCallback(async (code) => {
+    if (!code) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/v1/audio/languages/${encodeURIComponent(code)}`
+      );
+      if (!res.ok) return;
+      setLanguageInfo(await res.json());
+    } catch {
+      setLanguageInfo(null);
+    }
+  }, []);
+
   useEffect(() => { checkBackend(); }, []);
+  useEffect(() => { searchLanguages(""); }, [searchLanguages]);
+  useEffect(() => { describeLanguage(language); }, [language, describeLanguage]);
+
+  /* Debounce the catalogue search: 1077 languages, one request per pause. */
+  useEffect(() => {
+    const timer = window.setTimeout(() => searchLanguages(languageQuery), 250);
+    return () => window.clearTimeout(timer);
+  }, [languageQuery, searchLanguages]);
 
   // Fetch samples when mode switches to clone
   useEffect(() => {
     if (mode === "clone") fetchSamples();
   }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ---------- shared reader for a synthesis response ---------------- */
+  const applySynthesisPayload = useCallback((payload) => {
+    if (payload.modelUsed) setModelUsed(payload.modelUsed);
+    if (payload.phonemeTimestamps) setPhonemeTimestamps(payload.phonemeTimestamps);
+    if (payload.qualityReport) setQualityReport(payload.qualityReport);
+    if (payload.emotion) setEmotionReport(payload.emotion);
+    if (payload.latencyMs != null) setLatencyMs(payload.latencyMs);
+  }, []);
 
   /* ---------- audio playback time synchronization ------------------- */
   const handleAudioTimeUpdate = (e) => {
@@ -179,8 +287,7 @@ function App() {
         if (!res.ok) throw new Error("Task status check failed");
         const payload = await res.json();
         setTaskStatus(payload.status);
-        if (payload.modelUsed) setModelUsed(payload.modelUsed);
-        if (payload.phonemeTimestamps) setPhonemeTimestamps(payload.phonemeTimestamps);
+        applySynthesisPayload(payload);
         if (payload.status === "SUCCESS") {
           setAudioUrl(`${API_BASE}/outputs/speech.wav?t=${Date.now()}`);
         }
@@ -199,6 +306,9 @@ function App() {
     setAudioUrl("");
     setModelUsed(null);
     setPhonemeTimestamps([]);
+    setQualityReport(null);
+    setEmotionReport(null);
+    setLatencyMs(null);
     setIsSubmitting(true);
 
     try {
@@ -210,8 +320,13 @@ function App() {
         speed: parseFloat(speed),
         pitch: parseFloat(pitch),
         returnAlignment,
+        auditQuality,
       };
       if (style) body.style = style;
+      if (emotion) {
+        body.emotion = emotion;
+        body.emotionIntensity = parseFloat(emotionIntensity);
+      }
       // For clone mode, pass the selected input file path
       if (mode === "clone") {
         if (!selectedSample) {
@@ -235,8 +350,7 @@ function App() {
       setTaskId(payload.taskId);
       const newStatus = payload.status || "QUEUED";
       setTaskStatus(newStatus);
-      if (payload.modelUsed) setModelUsed(payload.modelUsed);
-      if (payload.phonemeTimestamps) setPhonemeTimestamps(payload.phonemeTimestamps);
+      applySynthesisPayload(payload);
       if (newStatus === "SUCCESS") {
         setAudioUrl(`${API_BASE}/outputs/speech.wav?t=${Date.now()}`);
       }
@@ -267,7 +381,9 @@ function App() {
         sampleRate: 24000,
         durationSeconds: Math.max(duration, 0.5),
         phonemeTimestamps: timestamps,
-        emotionVector: { happy: 0.8, neutral: 0.2, eyeblinkRate: 1.2 },
+        // Send the emotion the audio was actually rendered with, so the face
+        // matches the voice. Falls back to the Phase 0 default when neutral.
+        emotionVector: buildRenderEmotionVector(emotionReport),
         renderQuality: "1080P_HQ",
         targetFps: 30,
       };
@@ -292,7 +408,7 @@ function App() {
       <header className="header">
         <div>
           <h1>AI Avatar Creator Studio</h1>
-          <p>Phase 2 Voice Engine & Forced Alignment Pipeline</p>
+          <p>Phase 3 — Multilingual Synthesis, Emotion Prosody & Quality Auditing</p>
         </div>
         <div className="status">
           <span className="status-dot" />
@@ -304,8 +420,8 @@ function App() {
         {/* -------- LEFT: Controls -------- */}
         <section className="canvas-panel">
           <div className="panel-header">
-            <h2>Voice Synthesis & Prosody Controls</h2>
-            <span>Phase 2 Neural Stack</span>
+            <h2>Voice, Language & Emotion Controls</h2>
+            <span>Phase 3 Neural Stack</span>
           </div>
 
           <form className="studio-form" onSubmit={handleSynthesize}>
@@ -428,24 +544,132 @@ function App() {
               </div>
             )}
 
-            <div className="grid-two">
-              <label>
-                Language
-                <select id="language-select" value={language} onChange={(e) => setLanguage(e.target.value)}>
-                  {LANGUAGE_OPTIONS.map(({ value, label }) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
-              </label>
+            {/* Language: searchable picker over the full MMS-TTS catalogue */}
+            <div style={{
+              background: "#1e293b",
+              border: "1px solid #334155",
+              borderRadius: "10px",
+              padding: "14px",
+            }}>
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: "8px",
+              }}>
+                <span style={{ fontWeight: 600, fontSize: "0.85rem" }}>🌍 Language</span>
+                <span style={{ fontSize: "0.72rem", color: "#64748b" }}>
+                  {languageTotal > 0 ? `${languageTotal} MMS-TTS languages` : "loading…"}
+                </span>
+              </div>
 
-              <label>
-                Quality
-                <select id="quality-select" value={quality} onChange={(e) => setQuality(e.target.value)}>
-                  <option value="fast">fast</option>
-                  <option value="balanced">balanced</option>
-                  <option value="high">high → Higgs</option>
-                </select>
-              </label>
+              <input
+                id="language-search"
+                type="text"
+                value={languageQuery}
+                onChange={(e) => setLanguageQuery(e.target.value)}
+                placeholder="Search by name or ISO-639-3 code — e.g. Tamil, swh, Yoruba"
+                style={{ marginBottom: "8px" }}
+              />
+
+              <select
+                id="language-select"
+                value={language}
+                onChange={(e) => setLanguage(e.target.value)}
+              >
+                {/* Kokoro's English path is not in the MMS catalogue, so it is
+                    offered explicitly alongside the search results. */}
+                <option value="en">English (en) → Kokoro</option>
+                {languageResults
+                  .filter((entry) => entry.iso3 !== "eng")
+                  .map((entry) => (
+                    <option key={entry.iso3} value={entry.iso3}>
+                      {entry.name} ({entry.iso3})
+                    </option>
+                  ))}
+              </select>
+
+              {languageInfo && (
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: "4px",
+                  fontSize: "0.72rem",
+                  color: "#94a3b8",
+                  marginTop: "8px",
+                }}>
+                  <div>🔤 {languageInfo.name} ({languageInfo.iso3 || "—"})</div>
+                  <div>
+                    {languageInfo.mmsSupported
+                      ? <span style={{ color: "#4ade80" }}>✅ MMS-TTS available</span>
+                      : <span style={{ color: "#fbbf24" }}>⚡ No MMS checkpoint → Higgs</span>}
+                  </div>
+                  {languageInfo.mmsModel && (
+                    <div style={{ gridColumn: "1/-1", color: "#475569" }}>
+                      <code style={{ fontSize: "0.7rem" }}>{languageInfo.mmsModel}</code>
+                    </div>
+                  )}
+                  {languageInfo.xttsSupported && (
+                    <div style={{ gridColumn: "1/-1", color: "#60a5fa" }}>
+                      🎤 XTTS-v2 can also clone into this language
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <label>
+              Quality
+              <select id="quality-select" value={quality} onChange={(e) => setQuality(e.target.value)}>
+                <option value="fast">fast</option>
+                <option value="balanced">balanced</option>
+                <option value="high">high → Higgs</option>
+              </select>
+            </label>
+
+            {/* Phase 3: emotion prosody */}
+            <div style={{
+              background: "#1e293b",
+              border: "1px solid #334155",
+              borderRadius: "10px",
+              padding: "14px",
+            }}>
+              <span style={{ fontWeight: 600, fontSize: "0.85rem", display: "block", marginBottom: "8px" }}>
+                🎭 Emotion Prosody
+              </span>
+              <select
+                id="emotion-select"
+                value={emotion}
+                onChange={(e) => setEmotion(e.target.value)}
+              >
+                {Object.entries(EMOTION_INFO).map(([value, { label }]) => (
+                  <option key={value || "neutral"} value={value}>{label}</option>
+                ))}
+              </select>
+              <span style={{ fontSize: "0.72rem", color: "#9ca3af", marginTop: "4px", display: "block" }}>
+                {EMOTION_INFO[emotion]?.hint}
+              </span>
+
+              {emotion && (
+                <label style={{ marginTop: "10px", display: "block" }}>
+                  Intensity: <span style={{ color: "#38bdf8", fontWeight: "bold" }}>
+                    {Math.round(emotionIntensity * 100)}%
+                  </span>
+                  <input
+                    id="emotion-intensity"
+                    type="range"
+                    min="0.1"
+                    max="1"
+                    step="0.05"
+                    value={emotionIntensity}
+                    onChange={(e) => setEmotionIntensity(e.target.value)}
+                    style={{ width: "100%", accentColor: "#a855f7" }}
+                  />
+                  <span style={{ fontSize: "0.7rem", color: "#64748b" }}>
+                    The remainder of the vector stays neutral.
+                  </span>
+                </label>
+              )}
             </div>
 
             {/* Prosody controls: Speed & Pitch */}
@@ -487,6 +711,19 @@ function App() {
               />
               <label htmlFor="alignment-checkbox" style={{ fontSize: "0.82rem", color: "#e2e8f0", cursor: "pointer", margin: 0 }}>
                 ⚡ Extract Millisecond Phoneme & Viseme Timestamps
+              </label>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", margin: "6px 0" }}>
+              <input
+                type="checkbox"
+                id="audit-checkbox"
+                checked={auditQuality}
+                onChange={(e) => setAuditQuality(e.target.checked)}
+                style={{ width: "auto", cursor: "pointer" }}
+              />
+              <label htmlFor="audit-checkbox" style={{ fontSize: "0.82rem", color: "#e2e8f0", cursor: "pointer", margin: 0 }}>
+                📊 Audit Speech Quality (SQUIM MOS / PESQ) — adds ~1s
               </label>
             </div>
 
@@ -634,6 +871,75 @@ function App() {
                   ))}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Phase 3: speech quality audit */}
+          {qualityReport && (
+            <div className="info-card" style={{
+              background: "linear-gradient(135deg, #1e293b, #0f172a)",
+              border: `1px solid ${qualityReport.passesMosTarget ? "#22c55e" : "#f59e0b"}`,
+            }}>
+              <label style={{ color: qualityReport.passesMosTarget ? "#4ade80" : "#fbbf24" }}>
+                📊 Speech Quality
+              </label>
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: "6px",
+                fontSize: "0.78rem",
+                color: "#cbd5e1",
+                marginTop: "6px",
+              }}>
+                <div>
+                  MOS <strong style={{ color: qualityReport.passesMosTarget ? "#4ade80" : "#fbbf24" }}>
+                    {qualityReport.mos ?? "—"}
+                  </strong>
+                  <span style={{ color: "#64748b" }}> / target &gt; {qualityReport.mosTarget}</span>
+                </div>
+                <div>PESQ <strong>{qualityReport.pesq ?? "—"}</strong></div>
+                <div>STOI <strong>{qualityReport.stoi ?? "—"}</strong></div>
+                <div>SI-SDR <strong>{qualityReport.siSdr ?? "—"}</strong></div>
+              </div>
+              <div style={{ fontSize: "0.7rem", color: "#64748b", marginTop: "6px" }}>
+                method: {qualityReport.method}
+              </div>
+              {(qualityReport.warnings ?? []).map((warning, index) => (
+                <div key={index} style={{ fontSize: "0.7rem", color: "#fbbf24", marginTop: "3px" }}>
+                  ⚠️ {warning}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Phase 3: what the emotion transform actually did */}
+          {emotionReport?.applied && (
+            <div className="info-card">
+              <label>🎭 Emotion Applied</label>
+              <div style={{ fontSize: "0.78rem", color: "#cbd5e1", marginTop: "4px" }}>
+                <strong style={{ color: "#a855f7" }}>{emotionReport.dominant}</strong>
+                {" "}at {Math.round((emotionReport.intensity ?? 0) * 100)}%
+              </div>
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr 1fr",
+                gap: "4px",
+                fontSize: "0.7rem",
+                color: "#94a3b8",
+                marginTop: "6px",
+              }}>
+                <div>pitch {emotionReport.prosody?.pitch_semitones > 0 ? "+" : ""}
+                  {emotionReport.prosody?.pitch_semitones}st</div>
+                <div>rate {emotionReport.prosody?.rate}x</div>
+                <div>energy {emotionReport.prosody?.energy}x</div>
+              </div>
+            </div>
+          )}
+
+          {latencyMs != null && (
+            <div className="info-card">
+              <label>Synthesis Latency</label>
+              <strong>{Math.round(latencyMs)} ms</strong>
             </div>
           )}
 

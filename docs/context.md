@@ -1,9 +1,148 @@
 # AI Avatar Platform Development Context
 
-Last updated: 2026-09-04 (Session 2)
+Last updated: 2026-09-17 (Session 3)
 Owner: Developer 1 - Audio AI, Voice Synthesis, and Backend
 Roadmap source: `AI_Avatar_Platform_2_Developer_Roadmap.pdf`
-Primary requirements source: `4895e15d-8adb-4146-a985-52babca3b3c5_AI_Avatar_Creation_Platform_using_Open_Source_Tech.pdf`
+Primary requirements source: `4895e15d-...AI_Avatar_Creation_Platform_using_Open_Source_Tech.pdf`
+**⚠ That PDF is corrupted and unreadable — see "Blocked: requirements source lost" below.**
+
+---
+
+## Session 3 Audit (2026-09-17): corrections to the status claimed above
+
+An audit against both PDFs found three things this document had been asserting
+incorrectly. They are recorded here because the earlier sections below were
+written before the audit and still contain the original claims.
+
+### 1. Blocked: requirements source lost
+
+`docs/4895e15d-...AI_Avatar_Creation_Platform_using_Open_Source_Tech.pdf` is
+irrecoverably corrupted. Every byte above 0x7F was replaced with the UTF-8
+replacement character (61,512 occurrences), so all 131 content streams fail to
+inflate. `pdftotext`, `pdftohtml`, ghostscript and page rasterization all
+return empty. The file was moved through a text-mode transfer at some point.
+
+The roadmap PDF is intact (0 replacement characters) and remains readable.
+
+**Consequence**: the "PDF Milestone 1 Acceptance Matrix" section below is now
+the *only* surviving record of the assignment's thresholds (MOS >3.5,
+similarity >85%, <500 ms API, 100+ req/min, 5+ TTS models, OpenVoice V2).
+Those numbers cannot be verified, and any requirement nobody transcribed is
+lost. **Re-supply this PDF before trusting the acceptance matrix.**
+
+### 2. Three of five routed models never had weights
+
+The router's lazy-load-with-failure-cache design means a missing model
+degrades to a fallback instead of erroring. Combined with tests that mock
+model loading, this hid the following for three phases:
+
+| Model | Local weights | Reality |
+|---|---|---|
+| Kokoro-82M | 327 MB | working, benchmarked |
+| MMS-TTS (hin/tam/swh/spa) | 581 MB | working, benchmarked |
+| Higgs TTS 2 (3B) | **0 B** | `config.json` only — never ran |
+| Dia-1.6B | **0 B** | `config.json` only — never ran |
+| XTTS-v2 | **absent** | no Coqui download — never ran |
+
+So "Phase 1 complete, 4-model router" was really a 2-model router. The Phase 3
+benchmark measured Kokoro and MMS only; it never exercised the other three.
+
+Most seriously: **XTTS-v2 is the voice-cloning engine and has never
+synthesized anything.** `inputs/` is also empty, so no reference recording
+exists. Phase 2's headline deliverable is unproven, and cloning similarity is
+the one benchmark row still reading NOT MEASURED.
+
+**Fixed in this session** so it cannot recur silently:
+- `backend/model_registry.py` — audits weight presence on disk without
+  downloading or importing torch. A snapshot with no checkpoint-sized weight
+  file is reported absent.
+- `backend/app.py` — a `lifespan` handler prints and logs the audit at
+  startup; `/health` now carries a `modelWeights` block. `capabilities.models`
+  still lists *routable* keys, which is not the same as usable.
+- `scripts/fetch_models.py` — downloads the missing weights, refuses to leave
+  under 5 GB free, and re-audits afterwards rather than trusting the download.
+
+### 3. Dev 2 is at Phase 0, and no integration gate past 0 has been passed
+
+`frontend/package.json` has exactly two dependencies: `react` and `react-dom`.
+No MediaPipe, no FLAME, no three.js, no WebRTC, no OpenCV. The vision pillar
+is a React shell. The live viseme UI in `App.jsx` is Developer 1's work
+reaching across the contract to prove the audio side; there is no face mesh or
+lip sync behind it.
+
+| | Roadmap position | Reality |
+|---|---|---|
+| Developer 1 | Phase 3 | Phase 3 built, but 3 of 5 models never ran |
+| Developer 2 | Phase 0 | React shell + mock payloads |
+| **Gates passed** | — | **Gate 0 only** |
+
+Integration Gate 1 needs 468 MediaPipe landmarks fitted on a photo and has
+never been attempted. Every gate past 0 is therefore unpassed, which means
+Developer 1's entire Phase 1-3 output is currently un-integratable: correct,
+tested, and consumed by nothing.
+
+The 50/50 split has drifted to roughly 75/25 delivered. The *remaining* work
+to a demo is roughly 20% Developer 1 / 80% Developer 2.
+
+### Revised priorities (3-week window)
+
+The roadmap itself is sound — the phase structure and the frozen contract are
+both correct, and `AvatarRenderJob` matches the roadmap payload field-for-field.
+The execution *order* is what went wrong. Adding Developer 1 breadth now
+widens the imbalance and moves nothing a judge will see.
+
+**Week 1 — close Dev 1's real debt, then cross the line**
+- [x] Model weight audit so a fallback can never again pass for success.
+- [x] Wire the `uroman` romanizer into `ForcedAligner` (see below).
+- [ ] Fetch XTTS-v2 (`scripts/fetch_models.py`); accept the Coqui CPML licence.
+- [ ] Record 30-60 s of consented speech into `inputs/`, run the clone, measure
+      ECAPA similarity. Fills the empty benchmark row and supplies the demo voice.
+- [ ] Then help Developer 2: MediaPipe 468 landmarks + face cropper → **Gate 1**.
+
+**Week 2 — the only week that matters**
+- [ ] Lip sync integration → **Gate 2, first talking avatar**. This is the demo.
+- On 6 GB VRAM: Wav2Lip first as a guaranteed baseline, then MuseTalk for
+  quality. LatentSync is the roadmap's pick but is a diffusion model and will
+  be painful on this card. Run the pipeline sequentially — XTTS-v2 plus any
+  diffusion lip-sync model concurrently will OOM on 6141 MiB.
+
+**Week 3 — ethics + polish**
+- [ ] Minimal Phase 5: voice consent record + audio watermarking. Cheap for
+      Developer 1 and scores well on an open-source ethics rubric.
+- [ ] Benchmark writeup, 2-3 showcase scripts.
+
+**Explicitly cut**: OpenVoice V2 (XTTS-v2 already covers cloning), Phase 4
+WebRTC streaming (expensive, high failure risk), Kubernetes autoscaling,
+PostgreSQL persistence.
+
+### Also fixed this session: multilingual alignment
+
+`ForcedAligner._alignable_words` strips everything outside `a-z` plus
+apostrophe, so a Hindi or Tamil transcript reduced to zero alignable words and
+the aligner fell through to the energy-based `_acoustic_align` — producing
+timings unrelated to the speech. Phase 3 shipped MMS-TTS audio in 1000+
+languages that Developer 2 could not lip-sync.
+
+`backend/romanizer.py` now holds the shared lazy `uroman` instance that
+`mms_engine` already depended on, and `ForcedAligner._prepare_for_alignment`
+transliterates non-Latin transcripts before either aligner sees them:
+
+```
+hin: 'नमस्ते दुनिया'  -> 'namaste duniyaa'  -> ['namaste', 'duniyaa']
+tam: 'வணக்கம் உலகம்' -> 'vanakkam ulakam'   -> ['vanakkam', 'ulakam']
+```
+
+Phonemes are then derived from the romanization rather than the original
+orthography. That approximates the spoken sounds, but it drives the correct
+mouth shapes, which is what the viseme contract needs. Without `uroman`
+installed the aligner logs a warning and degrades — it no longer degrades
+silently.
+
+Test suite: **199 passing** (was 180; +13 `test_model_registry.py`,
++6 romanization tests in `test_alignment_accuracy.py`).
+
+---
+
 
 ## Project Structure & Current State (2026-09-04, Session 2)
 
@@ -199,9 +338,9 @@ The repository currently contains an initial Developer 1 voice milestone with mo
 ### Phase 1 - Core TTS Engine
 
 - [x] Kokoro integration is present in the router (fast, English, sub-second).
-- [x] XTTS-v2 integration is present in the router (clone mode, zero-shot voice cloning).
-- [x] Higgs TTS 2 (3B, `bosonai/higgs-tts-2-3b-base`) integrated for high_quality mode and multilingual synthesis.
-- [x] Dia-1.6B (`nari-labs/Dia-1.6B`) integrated for dialogue mode with [S1]/[S2] speaker tags.
+- [~] XTTS-v2 wired into the router (clone mode), but **weights never downloaded — has never run**. See Session 3 audit.
+- [~] Higgs TTS 2 (3B) wired for high_quality/multilingual, but **weights never downloaded — has never run**. See Session 3 audit.
+- [~] Dia-1.6B wired for dialogue mode with [S1]/[S2] tags, but **weights never downloaded — has never run**. See Session 3 audit.
 - [x] Automated model router: full routing decision matrix by mode, language, quality, and style signals.
 - [x] Graceful fallbacks: Higgs → XTTS-v2, Dia → Kokoro on load failure.
 - [x] Add structured synthesis responses with duration, sample rate, output URI, and model_used.
@@ -232,7 +371,7 @@ The broader PDF also asks for 5+ TTS models, MMS-TTS/OpenVoice support, lip sync
 - [x] Validate reference-audio duration, format, sample rate, and channels (`backend/audio_utils.py`).
 - [x] Auto audio format converter (`librosa` + `soundfile`) converting MP3/FLAC/OGG/M4A/etc. to 24kHz mono WAV.
 - [x] Voice sample selector directly from `inputs/` folder with real-time UI probe.
-- [x] Confirm XTTS-v2 as the zero-shot cloning backend integrated with validation pipeline.
+- [~] XTTS-v2 confirmed as the cloning backend in code; **unproven — no weights, and `inputs/` has no reference recording**.
 - [x] Implement forced alignment and millisecond phoneme timestamps (`backend/alignment_engine.py` with MMS_FA & acoustic aligner).
 - [x] Map phonemes to the shared 15 canonical viseme vocabulary (`PhonemeToVisemeMapper`).
 - [x] Prosody controls: speed/rhythm (0.5x–2.0x) and pitch shift (0.5x–2.0x).

@@ -19,6 +19,8 @@ import soundfile as sf
 import torch
 
 from contracts import PhonemeTimestamp
+from language_registry import to_iso3
+from romanizer import is_ascii, romanize
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +142,58 @@ CHAR_TO_PHONEME: dict[str, str] = {
     "o": "OW", "p": "P", "q": "K", "r": "R", "s": "S", "t": "T", "u": "AH",
     "v": "V", "w": "W", "x": "S", "y": "Y", "z": "Z",
 }
+
+# Two-letter graphemes that are a single phoneme. Consumed before the
+# single-character table so "ship" is SH-IH-P rather than S-HH-IH-P.
+DIGRAPH_TO_PHONEME: dict[str, str] = {
+    "th": "TH", "sh": "SH", "ch": "CH", "ph": "F", "ng": "NG",
+    "wh": "W", "ck": "K", "gh": "G",
+    "ee": "IY", "ea": "IY", "oo": "UW", "ou": "AW",
+    "ow": "OW", "ai": "EY", "ay": "EY", "oa": "OW",
+    "oi": "OY", "oy": "OY",
+}
+
+# Consonants after which a word-final "e" is silent ("time", "made", "name").
+_SILENT_E_BLOCKERS = set("aeiouy")
+
+
+def graphemes_to_phonemes(word: str) -> List[Tuple[str, int]]:
+    """
+    Split a lowercase word into ``(phoneme, characters_consumed)`` pairs.
+
+    The character counts matter as much as the phonemes: the forced aligner
+    gets one CTC span per character, so it needs to know how many spans to
+    merge into each phoneme. ``sum(count for _, count in result) == len(word)``
+    always holds, so spans and phonemes never drift apart.
+    """
+    low = word.lower()
+    groups: List[Tuple[str, int]] = []
+    index = 0
+    while index < len(low):
+        pair = low[index : index + 2]
+        if len(pair) == 2 and pair in DIGRAPH_TO_PHONEME:
+            groups.append((DIGRAPH_TO_PHONEME[pair], 2))
+            index += 2
+            continue
+
+        char = low[index]
+        is_final_silent_e = (
+            char == "e"
+            and index == len(low) - 1
+            and index >= 2
+            and low[index - 1] not in _SILENT_E_BLOCKERS
+        )
+        if is_final_silent_e and groups:
+            # Silent "e" has no sound of its own; fold its span into the
+            # phoneme before it so the mouth stays open through the vowel.
+            phoneme, count = groups[-1]
+            groups[-1] = (phoneme, count + 1)
+            index += 1
+            continue
+
+        groups.append((CHAR_TO_PHONEME.get(char, "AA"), 1))
+        index += 1
+    return groups
 
 
 class PhonemeToVisemeMapper:
@@ -273,18 +327,79 @@ class ForcedAligner:
                 )
             ]
 
+        # Both aligners work over a Latin alphabet, so non-Latin script has to
+        # be transliterated before either one sees it.
+        alignable_text = self._prepare_for_alignment(cleaned_text, language)
+
         # Try neural MMS_FA alignment if possible
         model, tokenizer = self._get_mms_pipeline()
         if model is not None and tokenizer is not None:
             try:
-                timestamps = self._align_mms(waveform, sample_rate, cleaned_text, model, tokenizer, duration_ms)
+                timestamps = self._align_mms(waveform, sample_rate, alignable_text, model, tokenizer, duration_ms)
                 if timestamps:
                     return timestamps
             except Exception as err:
                 logger.debug("MMS_FA inference failed, falling back to acoustic aligner: %s", err)
 
         # Fallback to acoustic / syllabic aligner
-        return self._acoustic_align(cleaned_text, duration_ms)
+        return self._acoustic_align(alignable_text, duration_ms)
+
+    @staticmethod
+    def _prepare_for_alignment(transcript: str, language: str) -> str:
+        """
+        Transliterate a non-Latin transcript so the aligners can consume it.
+
+        MMS_FA's dictionary is a-z plus apostrophe and the acoustic fallback
+        splits Latin graphemes, so Devanagari, Tamil, Cyrillic or Han input
+        would otherwise survive as zero alignable words and silently produce
+        timings unrelated to the speech. Romanizing first keeps the CTC frame
+        spans as the timing evidence.
+
+        The returned phonemes are derived from the romanization rather than
+        from the original orthography. That is an approximation of the spoken
+        sounds, but it drives the correct mouth shapes, which is what the
+        viseme contract needs.
+        """
+        if not transcript or is_ascii(transcript):
+            return transcript
+
+        romanized = romanize(transcript, lcode=to_iso3(language))
+        if romanized and romanized.strip():
+            logger.info(
+                "Romanized %s transcript for alignment (%d chars -> %d chars)",
+                language,
+                len(transcript),
+                len(romanized),
+            )
+            return romanized.strip()
+
+        logger.warning(
+            "Cannot align non-Latin %s transcript: uroman is not installed, so "
+            "timings will be acoustic estimates rather than forced alignment. "
+            "Install it with `pip install uroman`.",
+            language,
+        )
+        return transcript
+
+    # Minimum audible span for one phoneme; shorter CTC spans get widened.
+    MIN_PHONEME_MS = 20
+    # A gap this long between two words is rendered as an explicit closed mouth.
+    SILENCE_GAP_MS = 60
+
+    @staticmethod
+    def _alignable_words(transcript: str) -> List[str]:
+        """
+        Reduce a transcript to the words MMS_FA can actually align.
+
+        The MMS_FA dictionary holds a-z plus apostrophe, so digits, punctuation
+        and non-Latin characters are stripped; anything left empty is dropped.
+        """
+        words: List[str] = []
+        for raw in re.findall(r"[A-Za-z']+", transcript):
+            cleaned = raw.lower().strip("'")
+            if cleaned:
+                words.append(cleaned)
+        return words
 
     def _align_mms(
         self,
@@ -295,66 +410,104 @@ class ForcedAligner:
         tokenizer: any,
         duration_ms: int,
     ) -> List[PhonemeTimestamp]:
-        """Align using torchaudio MMS_FA CTC emissions."""
+        """
+        Align with torchaudio MMS_FA and keep the CTC frame spans.
+
+        MMS_FA is a character-level CTC aligner: ``forced_align`` assigns every
+        input frame to a target character, and ``merge_tokens`` collapses that
+        into one frame span per character. Those spans are the actual timing
+        evidence, so phonemes are built by merging the spans of the characters
+        that form them rather than by dividing the duration evenly.
+        """
         import torchaudio.functional as F
 
-        # MMS_FA expects 16kHz audio
-        if sample_rate != 16000:
-            resampler = F.resample(waveform, orig_freq=sample_rate, new_freq=16000)
-            audio_16k = resampler.to(self.device)
-        else:
-            audio_16k = waveform.to(self.device)
-
+        # MMS_FA expects 16 kHz mono.
+        audio_16k = waveform
         if audio_16k.ndim == 2 and audio_16k.shape[0] > 1:
             audio_16k = audio_16k.mean(dim=0, keepdim=True)
+        if sample_rate != 16000:
+            audio_16k = F.resample(audio_16k, orig_freq=sample_rate, new_freq=16000)
+        audio_16k = audio_16k.to(self.device)
 
-        with torch.inference_mode():
-            emission, _ = model(audio_16k)
-            emission = emission[0].cpu()
-
-        # Tokenize words
-        words = re.findall(r"\b\w+\b", transcript.lower())
+        words = self._alignable_words(transcript)
         if not words:
             return self._acoustic_align(transcript, duration_ms)
 
-        tokens = tokenizer(words)
-        # torchaudio forced_align
-        from torchaudio.functional import forced_align
+        token_lists = tokenizer(words)
+        pairs = [(w, t) for w, t in zip(words, token_lists) if t and len(t) == len(w)]
+        if not pairs:
+            raise RuntimeError("no transcript words survived MMS_FA tokenization")
+        words = [w for w, _ in pairs]
+        token_lists = [t for _, t in pairs]
 
-        targets = torch.tensor([t for word_tok in tokens for t in word_tok], dtype=torch.int32)
-        alignments, scores = forced_align(emission.unsqueeze(0), targets.unsqueeze(0))
-        alignments = alignments[0]
+        with torch.inference_mode():
+            emission, _ = model(audio_16k)
+        emission = emission.cpu()
 
-        # Calculate frame to millisecond factor
-        num_frames = emission.shape[0]
+        num_frames = int(emission.shape[1])
+        targets = torch.tensor(
+            [token for tokens in token_lists for token in tokens], dtype=torch.int32
+        ).unsqueeze(0)
+        if targets.shape[-1] == 0 or targets.shape[-1] > num_frames:
+            raise RuntimeError(
+                f"transcript has {targets.shape[-1]} tokens but the audio only "
+                f"yields {num_frames} CTC frames - audio and text do not match"
+            )
+
+        aligned_tokens, scores = F.forced_align(emission, targets, blank=0)
+        spans = F.merge_tokens(aligned_tokens[0], scores[0].exp())
+        if len(spans) != targets.shape[-1]:
+            raise RuntimeError(
+                f"CTC produced {len(spans)} spans for {targets.shape[-1]} tokens"
+            )
+
+        # One emission frame covers this many milliseconds of the source audio.
         ms_per_frame = duration_ms / max(num_frames, 1)
 
-        result_timestamps: List[PhonemeTimestamp] = []
-        curr_start = 0
+        result: List[PhonemeTimestamp] = []
+        span_index = 0
+        previous_end = 0
 
-        # Build timestamps for each word & phoneme
         for word in words:
-            chars = list(word)
-            if not chars:
-                continue
-            char_duration = max(30, int(duration_ms / max(len(transcript), 1)))
-            for char in chars:
-                p = CHAR_TO_PHONEME.get(char, "AA")
-                viseme = PhonemeToVisemeMapper.map_phoneme(p)
-                end_time = min(curr_start + char_duration, duration_ms)
-                if end_time <= curr_start:
-                    end_time = curr_start + 30
-                result_timestamps.append(
+            groups = graphemes_to_phonemes(word)
+            word_spans = spans[span_index : span_index + len(word)]
+            span_index += len(word)
+
+            word_start = int(round(word_spans[0].start * ms_per_frame))
+            if word_start - previous_end >= self.SILENCE_GAP_MS:
+                result.append(
                     PhonemeTimestamp(
-                        phoneme=p,
-                        viseme=viseme,
-                        startMs=curr_start,
-                        endMs=end_time,
+                        phoneme="SIL",
+                        viseme="viseme_sil",
+                        startMs=previous_end,
+                        endMs=word_start,
                     )
                 )
-                curr_start = end_time
 
-        return self._normalize_timestamps(result_timestamps, duration_ms)
+            offset = 0
+            for phoneme, char_count in groups:
+                group_spans = word_spans[offset : offset + char_count]
+                offset += char_count
+                if not group_spans:
+                    continue
+                start_ms = int(round(group_spans[0].start * ms_per_frame))
+                end_ms = int(round(group_spans[-1].end * ms_per_frame))
+                start_ms = max(start_ms, previous_end)
+                end_ms = max(end_ms, start_ms + self.MIN_PHONEME_MS)
+                result.append(
+                    PhonemeTimestamp(
+                        phoneme=phoneme,
+                        viseme=PhonemeToVisemeMapper.map_phoneme(phoneme),
+                        startMs=start_ms,
+                        endMs=end_ms,
+                    )
+                )
+                previous_end = end_ms
+
+        if not result:
+            raise RuntimeError("MMS_FA alignment produced no phoneme spans")
+
+        return self._normalize_timestamps(result, duration_ms)
 
     def _acoustic_align(self, transcript: str, duration_ms: int) -> List[PhonemeTimestamp]:
         """
@@ -376,31 +529,9 @@ class ForcedAligner:
         phoneme_units: list[str] = []
         for tok in tokens:
             if re.match(r"^\w+$", tok):
-                # Word: convert each character/digraph into phonemes
-                low = tok.lower()
-                i = 0
-                while i < len(low):
-                    if i + 1 < len(low) and low[i : i + 2] in ("th", "sh", "ch", "ph", "ng", "ee", "oo"):
-                        digraph = low[i : i + 2]
-                        if digraph == "th":
-                            phoneme_units.append("TH")
-                        elif digraph == "sh":
-                            phoneme_units.append("SH")
-                        elif digraph == "ch":
-                            phoneme_units.append("CH")
-                        elif digraph == "ph":
-                            phoneme_units.append("F")
-                        elif digraph == "ng":
-                            phoneme_units.append("NG")
-                        elif digraph == "ee":
-                            phoneme_units.append("IY")
-                        elif digraph == "oo":
-                            phoneme_units.append("UW")
-                        i += 2
-                    else:
-                        ch = low[i]
-                        phoneme_units.append(CHAR_TO_PHONEME.get(ch, "AA"))
-                        i += 1
+                # Word: same grapheme-to-phoneme split the CTC path uses, so
+                # both aligners emit the same phoneme sequence for a sentence.
+                phoneme_units.extend(p for p, _ in graphemes_to_phonemes(tok))
                 phoneme_units.append("SP")  # Word boundary pause
             elif tok in (".", "!", "?", ";"):
                 phoneme_units.append("SIL")  # Sentence boundary pause

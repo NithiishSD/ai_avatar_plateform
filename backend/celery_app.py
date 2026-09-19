@@ -1,5 +1,7 @@
 import os
+import threading
 from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
 
 project_root = Path(__file__).resolve().parents[1]
@@ -13,6 +15,21 @@ from celery import Celery
 
 from contracts import AudioSynthesisRequest, AvatarRenderJob
 from voice_engine import VoiceEngineRouter
+
+# One router per worker process. Building a new one per task threw away every
+# lazily-loaded model and paid the cold-start cost on every request.
+_router: Optional[VoiceEngineRouter] = None
+_router_lock = threading.Lock()
+
+
+def get_router() -> VoiceEngineRouter:
+    global _router
+    if _router is None:
+        with _router_lock:
+            if _router is None:
+                _router = VoiceEngineRouter()
+    return _router
+
 
 
 is_in_memory = os.getenv("QUEUE_BACKEND", "in_memory").lower() != "celery"
@@ -52,7 +69,7 @@ def process_render_job(payload: dict) -> dict:
 def synthesize_audio(payload: dict) -> dict:
     """Run the Developer 1 voice engine from a Celery task."""
     request = AudioSynthesisRequest.model_validate(payload)
-    result = VoiceEngineRouter().synthesize(
+    result = get_router().synthesize(
         text=request.text,
         mode=request.mode.value,
         language=request.language,
@@ -61,6 +78,10 @@ def synthesize_audio(payload: dict) -> dict:
         speed=request.speed,
         pitch=request.pitch,
         return_alignment=request.return_alignment,
+        emotion=request.emotion,
+        emotion_intensity=request.emotion_intensity,
+        emotion_vector=request.emotion_vector,
+        audit_quality=request.audit_quality,
         speaker_wav=request.speaker_wav,
         output_filename=request.output_filename,
     )
