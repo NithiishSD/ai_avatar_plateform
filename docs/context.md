@@ -1,12 +1,56 @@
 # AI Avatar Platform Development Context
 
-Last updated: 2026-09-17 (Session 3)
-Owner: Developer 1 - Audio AI, Voice Synthesis, and Backend
+**This file is the append-only session log.** Rules, commands and the module map
+are in `CLAUDE.md`; the task tracker is `docs/MILESTONES.md`; known failures are
+in `docs/DEBUGGING.md`. Add a new entry at the top of the log for every work
+session using the template below. Older sections further down predate this
+structure and some of their claims were corrected in later entries.
+
+Last updated: 2026-09-29 (Session 4)
 Roadmap source: `AI_Avatar_Platform_2_Developer_Roadmap.pdf`
 Primary requirements source: `4895e15d-...AI_Avatar_Creation_Platform_using_Open_Source_Tech.pdf`
 **⚠ That PDF is corrupted and unreadable — see "Blocked: requirements source lost" below.**
 
+### Entry template
+
+```
+## Session N (YYYY-MM-DD): <one-line summary>
+Tasks: <IDs from MILESTONES.md and their new status>
+Changed: <files and what changed>
+Verified: <how: tests run + count, live run on real weights/data, numbers, output paths>
+Not done / open: <what is still missing, and why>
+Next: <the next task ID>
+```
+
 ---
+
+## Session 4 (2026-09-18 to 2026-09-29): provenance guard, face engine, project docs, doctor
+Tasks: A-11 Built, A-12 Built, IM-01 Done; G1-01 is next.
+Changed:
+- `backend/provenance.py`: consent/provenance sidecars; synthetic or unrecorded
+  references are never admissible evidence.
+- `scripts/benchmark_phase3.py`: similarity reported as PIPELINE_TEST (not counted)
+  unless the reference is human and consented; matrix quotes the uncounted score.
+- `scripts/make_reference.py`: `--smoke` builds a 49 s synthetic reference from
+  Kokoro output; `--human` registers a real recording with its consent basis.
+- `backend/face_engine.py`: MediaPipe 1.x Tasks API; 478 landmarks, bbox, head pose
+  (Euler axes corrected: Y=yaw, X=pitch, Z=roll), 52 blendshapes, crop, selfie
+  segmentation (mask squeezed to (H, W)). Bundles in `.models/mediapipe/`.
+- `tests/test_provenance.py` (15 tests), `tests/test_face_engine.py` (mocked landmarker).
+- `.gitignore`: tracks `docs/*.pdf`; ignores `inputs/smoke_reference_*`.
+- Docs: `CLAUDE.md`, `docs/MILESTONES.md`, `docs/DEBUGGING.md`,
+  `docs/PROJECT_DOCUMENTATION.md` + `.pdf`, diagrams in `docs/images/`.
+- `scripts/doctor.py`: one-command health check (24 pass, 7 warn, 0 fail on 29 Sep).
+Verified: 214 tests passing (before `test_face_engine.py` existed). Face engine run
+live on one photo: 478 landmarks placed correctly, pose from transformation matrix,
+52 blendshapes. That photo (MediaPipe's `portrait.jpg`) carried a White House notice
+forbidding manipulation, so it and all derived images were deleted.
+Not done / open: `test_face_engine.py` never run; no face API route; no consented
+face or voice; XTTS-v2, Higgs, Dia weights still missing; PDF still corrupted.
+Next: G1-01, then G1-02 (needs a team decision on the demo face).
+
+---
+
 
 ## Session 3 Audit (2026-09-17): corrections to the status claimed above
 
