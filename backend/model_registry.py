@@ -36,6 +36,38 @@ WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pth", ".pt", ".ckpt", ".onnx")
 # one weight file big enough to be a real checkpoint shard.
 MIN_CHECKPOINT_BYTES = 1_000_000
 
+# ---------------------------------------------------------------------------
+# Vision-side model files. They live in the project's own ``.models/`` tree
+# rather than the HuggingFace cache, so the path *is* the contract: the engine
+# that loads a file and the audit that reports on it read the same constant.
+# ---------------------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_MODEL_DIR = PROJECT_ROOT / ".models"
+
+MEDIAPIPE_DIR = LOCAL_MODEL_DIR / "mediapipe"
+FACE_LANDMARKER_TASK = MEDIAPIPE_DIR / "face_landmarker.task"
+SELFIE_SEGMENTER_TFLITE = MEDIAPIPE_DIR / "selfie_segmenter.tflite"
+# Hair / skin / clothes classes, which the customization studio needs to know
+# *what* to repaint. The plain selfie segmenter only separates person from
+# background.
+MULTICLASS_SEGMENTER_TFLITE = MEDIAPIPE_DIR / "selfie_multiclass_256x256.tflite"
+
+WAV2LIP_DIR = LOCAL_MODEL_DIR / "wav2lip"
+# Either checkpoint drives the same network. The GAN one looks sharper, the
+# plain one syncs slightly tighter; the GAN file wins when both are present.
+WAV2LIP_CHECKPOINTS = (WAV2LIP_DIR / "wav2lip_gan.pth", WAV2LIP_DIR / "wav2lip.pth")
+
+SYNCNET_MODEL = LOCAL_MODEL_DIR / "syncnet" / "syncnet_v2.model"
+SFACE_MODEL = LOCAL_MODEL_DIR / "sface" / "face_recognition_sface_2021dec.onnx"
+
+# Overridable so a team with more VRAM, or a preferred checkpoint, can swap
+# the generator without touching code. Must be a Stable Diffusion 1.x layout.
+AVATAR_DIFFUSION_REPO = os.getenv(
+    "AVATAR_DIFFUSION_REPO", "stable-diffusion-v1-5/stable-diffusion-v1-5"
+)
+
+VISION_FETCH_COMMAND = "python scripts/fetch_vision_models.py"
+
 
 @dataclass(frozen=True)
 class ModelWeightStatus:
@@ -249,6 +281,130 @@ def audit_model_weights() -> List[ModelWeightStatus]:
     ]
 
 
+def check_local_file(
+    key: str,
+    name: str,
+    paths,
+    min_bytes: int = 100_000,
+    missing_detail: str = "",
+) -> ModelWeightStatus:
+    """
+    Audit a model that is a single file in ``.models/``.
+
+    ``paths`` may be one path or several acceptable alternatives; the first one
+    present wins. A file smaller than ``min_bytes`` is reported absent: an
+    interrupted download or a saved HTML error page would otherwise pass an
+    existence check and fail much later, inside the loader.
+    """
+    candidates = [Path(paths)] if isinstance(paths, (str, Path)) else [Path(p) for p in paths]
+    for candidate in candidates:
+        try:
+            size = candidate.stat().st_size if candidate.is_file() else 0
+        except OSError:
+            size = 0
+        if size >= min_bytes:
+            return ModelWeightStatus(
+                key=key,
+                name=name,
+                source=str(candidate),
+                present=True,
+                size_bytes=size,
+                detail="weights present",
+            )
+    truncated = [c for c in candidates if c.is_file()]
+    if truncated:
+        detail = (
+            f"{truncated[0].name} is only {truncated[0].stat().st_size} bytes - "
+            f"a truncated download. Delete it and re-run: "
+            f"{VISION_FETCH_COMMAND} --only {key}"
+        )
+    else:
+        detail = missing_detail or (
+            f"not downloaded. Fetch with: {VISION_FETCH_COMMAND} --only {key}"
+        )
+    return ModelWeightStatus(
+        key=key,
+        name=name,
+        source=str(candidates[0]),
+        present=False,
+        size_bytes=0,
+        detail=detail,
+    )
+
+
+def audit_vision_weights() -> List[ModelWeightStatus]:
+    """
+    Audit every model the vision pipeline can load.
+
+    Kept separate from ``audit_model_weights`` because the two lists answer
+    different questions: that one is "which TTS routes are real", this one is
+    "which render, metric and studio features are real". Only the face
+    landmarker is required for a talking avatar; everything else degrades a
+    named feature, and the detail string says which.
+    """
+    sd = check_hf_repo(
+        "avatar-diffusion",
+        "Stable Diffusion 1.5 (avatar generator / studio)",
+        AVATAR_DIFFUSION_REPO,
+    )
+    if not sd.present:
+        sd = ModelWeightStatus(
+            key=sd.key,
+            name=sd.name,
+            source=sd.source,
+            present=False,
+            size_bytes=0,
+            detail=(
+                f"{sd.detail}. Avatar generation, style transfer and hair/clothing "
+                f"edits cannot run. Fetch with: {VISION_FETCH_COMMAND} --only avatar-diffusion"
+            ),
+        )
+    return [
+        check_local_file(
+            "face-landmarker",
+            "MediaPipe Face Landmarker (478 points)",
+            FACE_LANDMARKER_TASK,
+            min_bytes=1_000_000,
+        ),
+        check_local_file(
+            "selfie-segmenter",
+            "MediaPipe Selfie Segmenter (background)",
+            SELFIE_SEGMENTER_TFLITE,
+        ),
+        check_local_file(
+            "multiclass-segmenter",
+            "MediaPipe Multiclass Segmenter (hair / clothes)",
+            MULTICLASS_SEGMENTER_TFLITE,
+            min_bytes=1_000_000,
+        ),
+        check_local_file(
+            "wav2lip",
+            "Wav2Lip (neural lip sync)",
+            WAV2LIP_CHECKPOINTS,
+            min_bytes=100_000_000,
+            missing_detail=(
+                "not downloaded, so the 'wav2lip' render engine is unavailable "
+                "(the blendshape engine still renders). Research / non-commercial "
+                f"licence, a human must accept it: {VISION_FETCH_COMMAND} "
+                "--only wav2lip --accept-licence wav2lip"
+            ),
+        ),
+        check_local_file(
+            "syncnet",
+            "SyncNet v2 (LSE-C / LSE-D lip-sync metric)",
+            SYNCNET_MODEL,
+            min_bytes=10_000_000,
+        ),
+        check_local_file(
+            "sface",
+            "SFace (identity preservation metric)",
+            SFACE_MODEL,
+            min_bytes=10_000_000,
+        ),
+        sd,
+    ]
+
+
 def log_weight_audit(statuses: Optional[List[ModelWeightStatus]] = None) -> List[ModelWeightStatus]:
     """
     Log the audit at startup, warning per missing model.
@@ -276,6 +432,43 @@ def log_weight_audit(statuses: Optional[List[ModelWeightStatus]] = None) -> List
             status.detail,
         )
     return statuses
+
+
+def log_vision_audit(
+    statuses: Optional[List[ModelWeightStatus]] = None,
+) -> List[ModelWeightStatus]:
+    """Log the vision audit at startup; one warning per missing model."""
+    statuses = statuses if statuses is not None else audit_vision_weights()
+    present = [s for s in statuses if s.present]
+    logger.info(
+        "Vision weight audit: %d/%d available (%s)",
+        len(present),
+        len(statuses),
+        ", ".join(f"{s.key} {s.size_label}" for s in present) or "none",
+    )
+    for status in statuses:
+        if not status.present:
+            logger.warning(
+                "VISION WEIGHTS MISSING - %s [%s]: %s",
+                status.name,
+                status.key,
+                status.detail,
+            )
+    return statuses
+
+
+def _summarise(statuses: List[ModelWeightStatus]) -> Dict[str, object]:
+    return {
+        "available": sum(1 for s in statuses if s.present),
+        "total": len(statuses),
+        "missing": [s.key for s in statuses if not s.present],
+        "models": [s.to_dict() for s in statuses],
+    }
+
+
+def vision_audit_summary() -> Dict[str, object]:
+    """The vision audit projected for ``/health``."""
+    return _summarise(audit_vision_weights())
 
 
 def audit_summary() -> Dict[str, object]:

@@ -36,10 +36,13 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL_DIR = PROJECT_ROOT / ".models" / "mediapipe"
-FACE_LANDMARKER_TASK = MODEL_DIR / "face_landmarker.task"
-SELFIE_SEGMENTER_TFLITE = MODEL_DIR / "selfie_segmenter.tflite"
+from model_registry import (  # noqa: E402  (paths shared with the weight audit)
+    FACE_LANDMARKER_TASK,
+    MEDIAPIPE_DIR as MODEL_DIR,
+    MULTICLASS_SEGMENTER_TFLITE,
+    PROJECT_ROOT,
+    SELFIE_SEGMENTER_TFLITE,
+)
 
 # The classic Face Mesh topology. Anything beyond this index is an iris point
 # added by the refined model.
@@ -54,6 +57,22 @@ LM_RIGHT_EYE_OUTER = 263
 LM_LEFT_MOUTH = 61
 LM_RIGHT_MOUTH = 291
 LM_FOREHEAD = 10
+
+
+# Detect more than one face even though only one is ever animated: the
+# quality gate has to be able to *see* a second face in order to reject it.
+DEFAULT_NUM_FACES = 4
+
+# Quality gate thresholds (task G1-06). Beyond ~30 degrees of yaw the far
+# half of the mouth is foreshortened enough that a 2-D lip-sync looks wrong.
+MAX_ABS_YAW_DEG = 30.0
+WARN_ABS_PITCH_DEG = 25.0
+WARN_ABS_ROLL_DEG = 20.0
+# Below this the mouth is a handful of pixels wide and there is nothing to
+# animate.
+MIN_FACE_HEIGHT_PX = 96
+WARN_MOUTH_OPEN = 0.25
+WARN_EYES_CLOSED = 0.6
 
 
 class FaceEngineUnavailable(RuntimeError):
@@ -297,6 +316,147 @@ def _pose_from_landmarks(
     )
 
 
+@dataclass(frozen=True)
+class QualityIssue:
+    """One reason a photo is unsuitable, or less than ideal, as an avatar."""
+
+    code: str
+    message: str
+    severity: str = "error"  # "error" rejects the photo; "warning" does not
+
+    def to_dict(self) -> Dict[str, str]:
+        return {"code": self.code, "message": self.message, "severity": self.severity}
+
+
+@dataclass
+class FaceQualityReport:
+    """The avatar quality gate's verdict on one photo."""
+
+    face_count: int
+    issues: List[QualityIssue] = field(default_factory=list)
+    analysis: Optional[FaceAnalysis] = None
+
+    @property
+    def errors(self) -> List[QualityIssue]:
+        return [i for i in self.issues if i.severity == "error"]
+
+    @property
+    def warnings(self) -> List[QualityIssue]:
+        return [i for i in self.issues if i.severity != "error"]
+
+    @property
+    def passed(self) -> bool:
+        return not self.errors
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "passed": self.passed,
+            "faceCount": self.face_count,
+            "errors": [i.to_dict() for i in self.errors],
+            "warnings": [i.to_dict() for i in self.warnings],
+        }
+
+
+def assess_face_quality(faces: Sequence[FaceAnalysis]) -> FaceQualityReport:
+    """
+    Decide whether a photo can become a talking avatar (task G1-06).
+
+    Rejects: no face, more than one face, a face turned more than 30 degrees,
+    a face too small to animate. Everything else that hurts the result but
+    does not prevent a render (tilt, an open mouth, closed eyes) is a warning,
+    so the user is told without being blocked.
+
+    Messages are written for the person who uploaded the photo: each one says
+    what is wrong and what to do about it.
+    """
+    if not faces:
+        return FaceQualityReport(
+            face_count=0,
+            issues=[
+                QualityIssue(
+                    "no_face",
+                    "No face was found. Use a well-lit photo of one person "
+                    "looking at the camera, with the whole face visible.",
+                )
+            ],
+        )
+
+    primary = faces[0]
+    issues: List[QualityIssue] = []
+
+    if len(faces) > 1:
+        issues.append(
+            QualityIssue(
+                "multiple_faces",
+                f"{len(faces)} faces were found. An avatar needs exactly one: "
+                "crop the photo to a single person.",
+            )
+        )
+
+    yaw = primary.head_pose.yaw
+    if abs(yaw) > MAX_ABS_YAW_DEG:
+        issues.append(
+            QualityIssue(
+                "yaw_too_large",
+                f"The head is turned {abs(yaw):.0f} degrees to the side; the limit "
+                f"is {MAX_ABS_YAW_DEG:.0f}. Use a photo facing the camera.",
+            )
+        )
+
+    if primary.bounding_box.height < MIN_FACE_HEIGHT_PX:
+        issues.append(
+            QualityIssue(
+                "face_too_small",
+                f"The face is only {primary.bounding_box.height} px tall; at least "
+                f"{MIN_FACE_HEIGHT_PX} px is needed. Use a closer or "
+                "higher-resolution photo.",
+            )
+        )
+
+    if abs(primary.head_pose.pitch) > WARN_ABS_PITCH_DEG:
+        issues.append(
+            QualityIssue(
+                "pitch_large",
+                f"The head is tilted {abs(primary.head_pose.pitch):.0f} degrees "
+                "up or down; lip sync looks best on a level face.",
+                severity="warning",
+            )
+        )
+    if abs(primary.head_pose.roll) > WARN_ABS_ROLL_DEG:
+        issues.append(
+            QualityIssue(
+                "roll_large",
+                f"The head leans {abs(primary.head_pose.roll):.0f} degrees; "
+                "an upright face animates more naturally.",
+                severity="warning",
+            )
+        )
+    if primary.blendshapes.get("jawOpen", 0.0) > WARN_MOUTH_OPEN:
+        issues.append(
+            QualityIssue(
+                "mouth_open",
+                "The mouth is open in this photo. A relaxed, closed mouth gives "
+                "the cleanest lip sync.",
+                severity="warning",
+            )
+        )
+    blink = max(
+        primary.blendshapes.get("eyeBlinkLeft", 0.0),
+        primary.blendshapes.get("eyeBlinkRight", 0.0),
+    )
+    if blink > WARN_EYES_CLOSED:
+        issues.append(
+            QualityIssue(
+                "eyes_closed",
+                "The eyes look closed or nearly closed; open eyes make a more "
+                "convincing avatar.",
+                severity="warning",
+            )
+        )
+
+    return FaceQualityReport(face_count=len(faces), issues=issues, analysis=primary)
+
+
 class FaceMeshEngine:
     """
     MediaPipe Face Mesh wrapper with lazy loading and cached failure.
@@ -311,7 +471,7 @@ class FaceMeshEngine:
     def __init__(
         self,
         model_path: Optional[Path | str] = None,
-        num_faces: int = 1,
+        num_faces: int = DEFAULT_NUM_FACES,
         min_detection_confidence: float = 0.5,
     ) -> None:
         self.model_path = Path(model_path or FACE_LANDMARKER_TASK)
@@ -359,14 +519,15 @@ class FaceMeshEngine:
             self._load_error = f"Could not initialise MediaPipe FaceLandmarker: {exc}"
             raise FaceEngineUnavailable(self._load_error) from exc
 
-    def analyze(
+    def analyze_faces(
         self, image: Union[str, Path, np.ndarray]
-    ) -> FaceAnalysis:
+    ) -> List[FaceAnalysis]:
         """
-        Detect the primary face and return its mesh, bounds, pose and shapes.
+        Every face the landmarker finds, largest first.
 
-        Raises ``NoFaceDetected`` rather than returning ``None`` so a caller
-        cannot mistake an empty result for a neutral one.
+        An empty list means no face: this method never raises for that, so
+        the quality gate can report "no face" and "two faces" through the
+        same path. ``analyze`` is the strict single-face entry point.
         """
         array = _as_rgb_array(image)
         height, width = array.shape[:2]
@@ -378,53 +539,81 @@ class FaceMeshEngine:
         result = landmarker.detect(mp_image)
 
         faces = getattr(result, "face_landmarks", None) or []
+        matrices = getattr(result, "facial_transformation_matrixes", None) or []
+        shape_lists = getattr(result, "face_blendshapes", None) or []
+
+        analyses: List[FaceAnalysis] = []
+        for index, face in enumerate(faces):
+            points: List[Tuple[float, float, float]] = [
+                (lm.x, lm.y, getattr(lm, "z", 0.0)) for lm in face
+            ]
+
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            x0 = max(0, int(min(xs) * width))
+            y0 = max(0, int(min(ys) * height))
+            bbox = BoundingBox(
+                x=x0,
+                y=y0,
+                width=min(width - x0, int((max(xs) - min(xs)) * width)),
+                height=min(height - y0, int((max(ys) - min(ys)) * height)),
+                image_width=width,
+                image_height=height,
+            )
+
+            if index < len(matrices):
+                yaw, pitch, roll = _euler_from_matrix(matrices[index])
+                pose = HeadPose(yaw, pitch, roll, source="transformation-matrix")
+            else:
+                pose = _pose_from_landmarks(points, width, height)
+
+            blendshapes: Dict[str, float] = {}
+            if index < len(shape_lists):
+                for category in shape_lists[index]:
+                    name = getattr(category, "category_name", None) or str(
+                        getattr(category, "index", "")
+                    )
+                    blendshapes[name] = float(category.score)
+
+            analyses.append(
+                FaceAnalysis(
+                    landmarks=points,
+                    bounding_box=bbox,
+                    head_pose=pose,
+                    blendshapes=blendshapes,
+                    image_width=width,
+                    image_height=height,
+                )
+            )
+
+        analyses.sort(
+            key=lambda a: a.bounding_box.width * a.bounding_box.height, reverse=True
+        )
+        return analyses
+
+    def analyze(
+        self, image: Union[str, Path, np.ndarray]
+    ) -> FaceAnalysis:
+        """
+        Detect the primary (largest) face and return its mesh, bounds, pose
+        and shapes.
+
+        Raises ``NoFaceDetected`` rather than returning ``None`` so a caller
+        cannot mistake an empty result for a neutral one.
+        """
+        faces = self.analyze_faces(image)
         if not faces:
             raise NoFaceDetected(
                 "No face detected. The photo needs a single, reasonably "
                 "front-facing, unobstructed face."
             )
+        return faces[0]
 
-        points: List[Tuple[float, float, float]] = [
-            (lm.x, lm.y, getattr(lm, "z", 0.0)) for lm in faces[0]
-        ]
-
-        xs = [p[0] for p in points]
-        ys = [p[1] for p in points]
-        x0 = max(0, int(min(xs) * width))
-        y0 = max(0, int(min(ys) * height))
-        bbox = BoundingBox(
-            x=x0,
-            y=y0,
-            width=min(width - x0, int((max(xs) - min(xs)) * width)),
-            height=min(height - y0, int((max(ys) - min(ys)) * height)),
-            image_width=width,
-            image_height=height,
-        )
-
-        matrices = getattr(result, "facial_transformation_matrixes", None) or []
-        if matrices:
-            yaw, pitch, roll = _euler_from_matrix(matrices[0])
-            pose = HeadPose(yaw, pitch, roll, source="transformation-matrix")
-        else:
-            pose = _pose_from_landmarks(points, width, height)
-
-        blendshapes: Dict[str, float] = {}
-        shape_lists = getattr(result, "face_blendshapes", None) or []
-        if shape_lists:
-            for category in shape_lists[0]:
-                name = getattr(category, "category_name", None) or str(
-                    getattr(category, "index", "")
-                )
-                blendshapes[name] = float(category.score)
-
-        return FaceAnalysis(
-            landmarks=points,
-            bounding_box=bbox,
-            head_pose=pose,
-            blendshapes=blendshapes,
-            image_width=width,
-            image_height=height,
-        )
+    def check_quality(
+        self, image: Union[str, Path, np.ndarray]
+    ) -> "FaceQualityReport":
+        """Run the avatar quality gate on a photo. See ``assess_face_quality``."""
+        return assess_face_quality(self.analyze_faces(image))
 
     def crop_face(
         self,
@@ -573,9 +762,133 @@ class BackgroundSegmenter:
             self._segmenter = None
 
 
+# Category order of MediaPipe's ``selfie_multiclass_256x256`` model.
+MULTICLASS_CATEGORIES = (
+    "background",
+    "hair",
+    "body_skin",
+    "face_skin",
+    "clothes",
+    "others",
+)
+
+
+class MulticlassSegmenter:
+    """
+    Hair / skin / clothes segmentation for the customization studio.
+
+    The plain selfie segmenter only knows person versus background. Repainting
+    hair or clothing needs to know *which part* of the person a pixel is, and
+    this model answers that with one confidence mask per category.
+    """
+
+    def __init__(self, model_path: Optional[Path | str] = None) -> None:
+        self.model_path = Path(model_path or MULTICLASS_SEGMENTER_TFLITE)
+        self._segmenter = None
+        self._load_error: Optional[str] = None
+
+    @property
+    def available(self) -> bool:
+        return self.model_path.is_file()
+
+    def _load(self):
+        if self._segmenter is not None:
+            return self._segmenter
+        if self._load_error is not None:
+            raise FaceEngineUnavailable(self._load_error)
+        if not self.model_path.is_file():
+            self._load_error = (
+                f"Multiclass segmenter not found at {self.model_path}. Fetch it "
+                "with: python scripts/fetch_vision_models.py --only multiclass-segmenter"
+            )
+            raise FaceEngineUnavailable(self._load_error)
+        try:
+            from mediapipe.tasks import python as mp_python
+            from mediapipe.tasks.python import vision
+
+            options = vision.ImageSegmenterOptions(
+                base_options=mp_python.BaseOptions(
+                    model_asset_path=str(self.model_path)
+                ),
+                running_mode=_running_mode_image(),
+                output_category_mask=False,
+                output_confidence_masks=True,
+            )
+            self._segmenter = vision.ImageSegmenter.create_from_options(options)
+            logger.info("Loaded MediaPipe multiclass segmenter from %s", self.model_path)
+            return self._segmenter
+        except Exception as exc:  # noqa: BLE001
+            self._load_error = f"Could not initialise the multiclass segmenter: {exc}"
+            raise FaceEngineUnavailable(self._load_error) from exc
+
+    def category_masks(
+        self, image: Union[str, Path, np.ndarray]
+    ) -> Dict[str, np.ndarray]:
+        """One float32 mask in [0, 1] per category, at the image's resolution."""
+        array = _as_rgb_array(image)
+        segmenter = self._load()
+
+        import cv2
+        import mediapipe as mp
+
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=array)
+        result = segmenter.segment(mp_image)
+        masks = getattr(result, "confidence_masks", None) or []
+        if len(masks) < len(MULTICLASS_CATEGORIES):
+            raise FaceEngineUnavailable(
+                f"multiclass segmenter returned {len(masks)} masks, expected "
+                f"{len(MULTICLASS_CATEGORIES)}; the model file may be the wrong one"
+            )
+
+        out: Dict[str, np.ndarray] = {}
+        for name, mask in zip(MULTICLASS_CATEGORIES, masks):
+            data = np.asarray(mask.numpy_view(), dtype=np.float32)
+            if data.ndim == 3 and data.shape[2] == 1:
+                data = data[:, :, 0]
+            if data.shape[:2] != array.shape[:2]:
+                data = cv2.resize(
+                    data,
+                    (array.shape[1], array.shape[0]),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+            out[name] = np.clip(data, 0.0, 1.0)
+        return out
+
+    def close(self) -> None:
+        if self._segmenter is not None:
+            try:
+                self._segmenter.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._segmenter = None
+
+
 def vision_models_present() -> Dict[str, bool]:
     """Which vision bundles are on disk, for the startup weight audit."""
     return {
         "face_landmarker": FACE_LANDMARKER_TASK.is_file(),
         "selfie_segmenter": SELFIE_SEGMENTER_TFLITE.is_file(),
+        "multiclass_segmenter": MULTICLASS_SEGMENTER_TFLITE.is_file(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Process-wide engine
+# ---------------------------------------------------------------------------
+# The landmarker is a native object that is not documented as thread-safe, and
+# the API serves requests from a thread pool while the render worker runs on
+# its own thread. One shared instance behind one lock keeps a single copy of
+# the model in memory and makes concurrent detection impossible.
+import threading  # noqa: E402
+
+FACE_ENGINE_LOCK = threading.RLock()
+_shared_engine: Optional[FaceMeshEngine] = None
+
+
+def shared_face_engine() -> FaceMeshEngine:
+    """The process-wide ``FaceMeshEngine``. Hold ``FACE_ENGINE_LOCK`` to use it."""
+    global _shared_engine
+    with FACE_ENGINE_LOCK:
+        if _shared_engine is None:
+            _shared_engine = FaceMeshEngine()
+        return _shared_engine

@@ -18,6 +18,12 @@ belongs to and on what basis it may be cloned.
 A sidecar ``<audio>.provenance.json`` answers both. ``SYNTHETIC`` references
 stay usable for wiring up the pipeline; only a ``HUMAN`` clip with a recorded
 consent basis is admissible as evidence for the threshold.
+
+Face photos use the same sidecar. For a face the question that matters is not
+"is this admissible evidence" but "may this be animated at all": a talking
+avatar of a real person made without their consent is the harm this project
+most needs to prevent. ``usability`` answers that, and the avatar store and
+the renderer both refuse an image that fails it.
 """
 
 from __future__ import annotations
@@ -42,6 +48,14 @@ CONSENT_BASES = {
     "open-licence",  # public corpus (LJSpeech, LibriSpeech, VCTK, ...)
 }
 
+# Consent bases for a human face. "subject-provided" is the face equivalent of
+# "speaker-recorded": the person in the photo supplied it for this project.
+FACE_CONSENT_BASES = {
+    "subject-provided",
+    "written-consent",
+    "open-licence",
+}
+
 
 @dataclass
 class VoiceProvenance:
@@ -55,10 +69,32 @@ class VoiceProvenance:
     created: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
+    # Free-form lineage: generator model, prompt and seed for a synthetic
+    # image, or the parent avatar and the edits applied for a derived one.
+    extra: Dict[str, object] = field(default_factory=dict)
 
     @property
     def is_synthetic(self) -> bool:
         return self.source == SYNTHETIC
+
+    def usability(self) -> tuple[bool, str]:
+        """
+        Whether this media may be used (cloned, animated) at all.
+
+        Weaker than ``admissibility``: a synthetic voice or face depicts no
+        real person, so it is usable for anything even though it can never
+        back a published metric. A human one needs a recorded consent basis.
+        """
+        if self.source == SYNTHETIC:
+            return True, "synthetic media; depicts no real person"
+        if self.source != HUMAN:
+            return False, f"unknown provenance source {self.source!r}"
+        accepted = CONSENT_BASES | FACE_CONSENT_BASES
+        if self.consent_basis not in accepted:
+            return False, (
+                f"consent basis {self.consent_basis!r} is not one of {sorted(accepted)}"
+            )
+        return True, f"human subject, consent basis: {self.consent_basis}"
 
     def admissibility(self) -> tuple[bool, str]:
         """
@@ -90,6 +126,7 @@ class VoiceProvenance:
             "consentBasis": self.consent_basis,
             "notes": self.notes,
             "created": self.created,
+            **({"extra": self.extra} if self.extra else {}),
         }
 
     @classmethod
@@ -101,7 +138,13 @@ class VoiceProvenance:
             consent_basis=str(raw.get("consentBasis", "")),
             notes=str(raw.get("notes", "")),
             created=str(raw.get("created", "")),
+            extra=dict(raw.get("extra") or {}) if isinstance(raw.get("extra"), dict) else {},
         )
+
+
+# The record is the same for a voice and a face; the older name stays because
+# the benchmark and its tests import it.
+MediaProvenance = VoiceProvenance
 
 
 def sidecar_path(audio_path: Path | str) -> Path:
@@ -128,6 +171,7 @@ def write(
     licence: str = "",
     consent_basis: str = "",
     notes: str = "",
+    extra: Optional[Dict[str, object]] = None,
 ) -> Path:
     """Write a provenance sidecar beside ``audio_path`` and return its path."""
     if source not in (HUMAN, SYNTHETIC):
@@ -138,6 +182,7 @@ def write(
         licence=licence,
         consent_basis=consent_basis,
         notes=notes,
+        extra=dict(extra or {}),
     )
     path = sidecar_path(audio_path)
     path.write_text(json.dumps(record.to_dict(), indent=2) + "\n")
@@ -169,6 +214,23 @@ def describe(audio_path: Path | str) -> Dict[str, object]:
         "reason": reason,
         **record.to_dict(),
     }
+
+
+def usability(media_path: Path | str) -> tuple[bool, str]:
+    """
+    Whether ``media_path`` may be used at all, and why (not).
+
+    No record means no: an unlabelled face is exactly the case the consent
+    rule exists for, and the reason names the fix.
+    """
+    record = load(media_path)
+    if record is None:
+        return False, (
+            f"no provenance record ({sidecar_path(media_path).name} is missing). "
+            "Register the image with scripts/make_avatar.py, which records who "
+            "it depicts and on what basis it may be animated."
+        )
+    return record.usability()
 
 
 def warnings_for(audio_path: Path | str) -> List[str]:
